@@ -40,7 +40,7 @@ async function loadStatus() {
   bar.textContent = `${s.products} products tracked · data ${s.min_date} → ${s.max_date} · last refreshed ${s.last_updated || '—'}`;
 }
 
-function buildQuery() {
+function buildFilterParams() {
   const params = new URLSearchParams();
   if (el('startDate').value) params.set('start', el('startDate').value);
   if (el('endDate').value) params.set('end', el('endDate').value);
@@ -51,6 +51,11 @@ function buildQuery() {
   if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
   params.set('sort', state.sort);
   params.set('dir', state.dir);
+  return params;
+}
+
+function buildQuery() {
+  const params = buildFilterParams();
   params.set('limit', PAGE_SIZE);
   params.set('offset', state.offset);
   return params.toString();
@@ -269,6 +274,11 @@ el('refreshBtn').addEventListener('click', async () => {
     btn.disabled = false;
     btn.textContent = '↻ Refresh from GA4';
   }
+});
+
+el('exportBtn').addEventListener('click', () => {
+  const params = buildFilterParams();
+  window.location.href = `/api/export?${params.toString()}`;
 });
 
 (async function init() {

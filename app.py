@@ -387,20 +387,13 @@ SORT_KEYS = {
 }
 
 
-@app.get("/api/products")
-async def api_products(
-    start: str | None = None,
-    end: str | None = None,
-    category: str | None = None,
-    partner: str | None = None,
-    source: str | None = None,
-    interest: str | None = None,
-    q: str | None = None,
-    sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
-    dir: str = Query("desc", pattern="^(asc|desc)$"),
-    limit: int = Query(200, ge=1, le=2000),
-    offset: int = Query(0, ge=0),
-):
+def fetch_filtered_products(
+    start: str | None, end: str | None, category: str | None, partner: str | None,
+    source: str | None, q: str | None, interest: str | None,
+    sort: str, dir: str,
+) -> list[dict]:
+    """Shared by /api/products (paginated) and /api/export (full CSV) so the
+    export always matches exactly what the table's current filters show."""
     con = db()
     query = """SELECT product_code, MAX(product_name) product_name,
                       MAX(partner_code) partner_code, MAX(category) category,
@@ -457,9 +450,67 @@ async def api_products(
         items = [i for i in items if i["interest"] == interest]
 
     items.sort(key=SORT_KEYS[sort], reverse=(dir == "desc"))
+    return items
+
+
+@app.get("/api/products")
+async def api_products(
+    start: str | None = None,
+    end: str | None = None,
+    category: str | None = None,
+    partner: str | None = None,
+    source: str | None = None,
+    interest: str | None = None,
+    q: str | None = None,
+    sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
+    limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+):
+    items = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
     total = len(items)
     page = items[offset:offset + limit]
     return {"count": total, "returned": len(page), "offset": offset, "limit": limit, "items": page}
+
+
+@app.get("/api/export")
+async def api_export(
+    start: str | None = None,
+    end: str | None = None,
+    category: str | None = None,
+    partner: str | None = None,
+    source: str | None = None,
+    interest: str | None = None,
+    q: str | None = None,
+    sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
+):
+    items = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
+
+    import csv
+    import io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "Interest", "Product Code", "Product Name", "Partner Code", "Category",
+        "Source", "OOS Views", "Days OOS", "First OOS Date", "Last OOS Date",
+    ])
+    source_labels = {"partner_central": "Partner Central", "ecommerce": "Ecommerce"}
+    for i in items:
+        writer.writerow([
+            i["interest"], i["product_code"], i["product_name"] or "",
+            i["partner_code"] or "", i["category"] or "",
+            source_labels.get(i["source_type"], i["source_type"] or ""),
+            i["oos_views"], i["days_oos"],
+            i["first_oos_date"] or "", i["last_oos_date"] or "",
+        ])
+
+    filename = f"kapruka-out-of-stock-{time.strftime('%Y%m%d')}.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),  # BOM so Excel opens UTF-8 correctly
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/trend/{product_code}")
