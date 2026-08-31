@@ -78,6 +78,12 @@ OOS_EVENT_NAME = os.environ.get("OOS_EVENT_NAME", "out_of_stock_view")
 PARTNER_CODE_RE = re.compile(r"^ef_pc_[a-z]+0v(\d+)", re.IGNORECASE)
 CATEGORY_CODE_RE = re.compile(r"^ef_pc_([a-z]+?)0v\d+", re.IGNORECASE)
 
+# Ecommerce (native Kapruka catalog) codes have no ef_pc_ prefix and no
+# partner segment - just a category/merchant word directly followed by
+# digits, e.g. grocery001737, pharmacy00844, pizzahut00114_tc1. The leading
+# alphabetic run is the closest thing to a category GA4 gives us for these.
+ECOMMERCE_CATEGORY_RE = re.compile(r"^([a-z]+)\d", re.IGNORECASE)
+
 app = FastAPI(title="Kapruka Out-of-Stock Dashboard")
 
 _resolved_dims: dict[str, str] = {}
@@ -159,11 +165,23 @@ def extract_partner_code(product_code: str) -> str | None:
 
 
 def extract_category(product_code: str) -> str | None:
-    """Category token out of the PC code, e.g. ef_pc_home0v2057pod00141p -> 'home'."""
+    """Category token out of the product code.
+
+    Partner Central: ef_pc_home0v2057pod00141p -> 'home'.
+    Ecommerce: grocery001737 -> 'grocery', pizzahut00114_tc1 -> 'pizzahut'.
+    Ecommerce codes carry no ef_pc_ prefix or partner segment, so the leading
+    alphabetic run before the first digit is the best category signal GA4
+    gives us - for merchant-branded codes (pizzahut, kingsburyf) that ends up
+    being the merchant name rather than a true category, but it's still a
+    meaningful, filterable grouping.
+    """
     if not product_code:
         return None
     m = CATEGORY_CODE_RE.match(product_code)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    m = ECOMMERCE_CATEGORY_RE.match(product_code)
+    return m.group(1).lower() if m else None
 
 
 def extract_source_type(product_code: str) -> str:
@@ -351,6 +369,26 @@ async def api_refresh(days: int = Query(30, ge=1, le=90)):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/backfill-categories")
+async def api_backfill_categories():
+    """Recompute category/source_type for every row already in the DB from
+    extract_category()/extract_source_type() alone - no GA4 call. Lets a
+    fixed extraction rule (e.g. the ecommerce category fallback) apply to
+    rows synced before the fix, without waiting on a full GA4 re-pull."""
+    con = db()
+    codes = [r["product_code"] for r in con.execute("SELECT DISTINCT product_code FROM oos_daily").fetchall()]
+    updated = 0
+    for code in codes:
+        con.execute(
+            "UPDATE oos_daily SET category = ?, partner_code = ?, source_type = ? WHERE product_code = ?",
+            (extract_category(code), extract_partner_code(code), extract_source_type(code), code),
+        )
+        updated += 1
+    con.commit()
+    con.close()
+    return {"ok": True, "products_updated": updated}
 
 
 @app.get("/api/categories")
