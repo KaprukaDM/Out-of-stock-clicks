@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Out of Stock Dashboard — Kapruka</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="container">
+      <h1>📦 Out of Stock Dashboard</h1>
+      <p>GA4 <code>out_of_stock_view</code> events — which unavailable products people still want</p>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="toolbar">
+      <div class="filter-group">
+        <label>Date range</label>
+        <div class="date-inputs">
+          <input type="date" id="startDate">
+          <span>to</span>
+          <input type="date" id="endDate">
+        </div>
+      </div>
+      <div class="filter-group">
+        <label>Category</label>
+        <select id="categoryFilter"><option value="">All categories</option></select>
+      </div>
+      <div class="filter-group">
+        <label>Partner code</label>
+        <select id="partnerFilter"><option value="">All partners</option></select>
+      </div>
+      <div class="filter-group">
+        <label>Interest</label>
+        <select id="interestFilter">
+          <option value="">All levels</option>
+          <option value="high">🔴 High</option>
+          <option value="medium">🟠 Medium</option>
+          <option value="low">⚪ Low</option>
+        </select>
+      </div>
+      <div class="filter-group grow">
+        <label>Search</label>
+        <input type="text" id="searchBox" placeholder="Product code or name…">
+      </div>
+      <div class="filter-group">
+        <label>&nbsp;</label>
+        <button class="btn btn-primary" id="applyBtn">Apply</button>
+      </div>
+      <div class="filter-group">
+        <label>&nbsp;</label>
+        <button class="btn btn-secondary" id="refreshBtn">↻ Refresh from GA4</button>
+      </div>
+    </div>
+
+    <div class="caveat-banner">
+      ⚠️ <strong>Interest is based on out_of_stock_view event count only.</strong>
+      GA4's per-product custom parameters aren't set on regular page views, and
+      <code>totalUsers</code> on this event is stuck at 1 even for products with
+      thousands of hits — a tagging gap, not thousands of repeat visits. Counts
+      may include bot/retry traffic; treat interest levels as directional, and
+      consider fixing the event's user/session identification at the source.
+    </div>
+
+    <div class="status-bar" id="statusBar"></div>
+
+    <div class="table-wrap">
+      <table id="productsTable">
+        <thead>
+          <tr>
+            <th>Interest</th>
+            <th>Product Code</th>
+            <th>Product Name</th>
+            <th>Partner</th>
+            <th>Category</th>
+            <th>OOS Views</th>
+            <th>Days OOS</th>
+            <th>First / Last OOS</th>
+          </tr>
+        </thead>
+        <tbody id="productsBody">
+          <tr><td colspan="8" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination" id="pagination"></div>
+  </div>
+
+  <div class="modal-overlay" id="trendModal">
+    <div class="modal">
+      <button class="modal-close" id="modalClose">✕</button>
+      <h2 id="trendTitle">Trend</h2>
+      <div class="trend-meta" id="trendMeta"></div>
+      <canvas id="trendCanvas" width="900" height="360"></canvas>
+      <div class="trend-legend">
+        <span><i class="dot dot-oos"></i> Out-of-stock views</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
