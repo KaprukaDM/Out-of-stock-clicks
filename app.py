@@ -166,6 +166,15 @@ def extract_category(product_code: str) -> str | None:
     return m.group(1) if m else None
 
 
+def extract_source_type(product_code: str) -> str:
+    """'partner_central' for ef_pc_* codes (third-party sellers via Partner
+    Central), 'ecommerce' for everything else (Kapruka's own catalog, e.g.
+    grocery001737, pharmacy00844)."""
+    if product_code and product_code.lower().startswith("ef_pc_"):
+        return "partner_central"
+    return "ecommerce"
+
+
 # ------------------------------------------------------------------ db
 def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
@@ -182,6 +191,7 @@ def init_db():
         product_name TEXT,
         partner_code TEXT,
         category TEXT,
+        source_type TEXT,
         oos_views INTEGER DEFAULT 0,
         updated_at TEXT,
         PRIMARY KEY (product_code, date)
@@ -190,6 +200,7 @@ def init_db():
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_date ON oos_daily(date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_partner ON oos_daily(partner_code)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_category ON oos_daily(category)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_oos_source ON oos_daily(source_type)")
     con.commit()
     con.close()
 
@@ -275,17 +286,18 @@ async def refresh_from_ga4(days: int = 30) -> dict:
         if not code or code == "(not set)":
             continue
         con.execute("""
-            INSERT INTO oos_daily (date, product_code, product_name, partner_code, category, oos_views, updated_at)
-            VALUES (?,?,?,?,?,?,?)
-            ON CONFLICT(date, product_code) DO UPDATE SET
+            INSERT INTO oos_daily (date, product_code, product_name, partner_code, category, source_type, oos_views, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(product_code, date) DO UPDATE SET
                 product_name=excluded.product_name,
                 partner_code=excluded.partner_code,
                 category=excluded.category,
+                source_type=excluded.source_type,
                 oos_views=excluded.oos_views,
                 updated_at=excluded.updated_at
         """, (
             date_s, code, rec.get("product_name"),
-            extract_partner_code(code), extract_category(code),
+            extract_partner_code(code), extract_category(code), extract_source_type(code),
             rec["oos_views"], now,
         ))
         n += 1
@@ -357,20 +369,42 @@ async def api_partners():
     return [r["partner_code"] for r in rows]
 
 
+@app.get("/api/sources")
+async def api_sources():
+    return ["partner_central", "ecommerce"]
+
+
+SORT_KEYS = {
+    "product_code": lambda i: (i["product_code"] or ""),
+    "product_name": lambda i: (i["product_name"] or ""),
+    "partner_code": lambda i: (i["partner_code"] or ""),
+    "category": lambda i: (i["category"] or ""),
+    "oos_views": lambda i: i["oos_views"],
+    "days_oos": lambda i: i["days_oos"],
+    "first_oos_date": lambda i: (i["first_oos_date"] or ""),
+    "last_oos_date": lambda i: (i["last_oos_date"] or ""),
+    "interest": lambda i: {"low": 0, "medium": 1, "high": 2}[i["interest"]],
+}
+
+
 @app.get("/api/products")
 async def api_products(
     start: str | None = None,
     end: str | None = None,
     category: str | None = None,
     partner: str | None = None,
+    source: str | None = None,
     interest: str | None = None,
     q: str | None = None,
+    sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
     con = db()
     query = """SELECT product_code, MAX(product_name) product_name,
                       MAX(partner_code) partner_code, MAX(category) category,
+                      MAX(source_type) source_type,
                       SUM(oos_views) oos_views,
                       SUM(CASE WHEN oos_views > 0 THEN 1 ELSE 0 END) days_oos,
                       MIN(CASE WHEN oos_views > 0 THEN date END) first_oos_date,
@@ -389,6 +423,9 @@ async def api_products(
     if partner:
         query += " AND partner_code = ?"
         params.append(partner)
+    if source:
+        query += " AND source_type = ?"
+        params.append(source)
     if q:
         query += " AND (product_code LIKE ? OR product_name LIKE ?)"
         params.extend([f"%{q}%", f"%{q}%"])
@@ -402,6 +439,7 @@ async def api_products(
         "product_name": r["product_name"],
         "partner_code": r["partner_code"],
         "category": r["category"],
+        "source_type": r["source_type"],
         "oos_views": r["oos_views"],
         "days_oos": r["days_oos"],
         "first_oos_date": r["first_oos_date"],
@@ -409,16 +447,16 @@ async def api_products(
     } for r in rows]
 
     # Interest is percentile-based within this filtered set (category/partner/
-    # date/search), so it's computed BEFORE the interest filter itself is
-    # applied - filtering first would re-percentile an already-filtered set,
-    # which is circular (e.g. filtering to "low" would always leave ~50% of
-    # what's left relabelled "high").
+    # source/date/search), so it's computed BEFORE the interest filter itself
+    # is applied - filtering first would re-percentile an already-filtered
+    # set, which is circular (e.g. filtering to "low" would always leave ~50%
+    # of what's left relabelled "high").
     assign_interest_levels(items)
 
     if interest:
         items = [i for i in items if i["interest"] == interest]
 
-    items.sort(key=lambda i: (-i["oos_views"], -i["days_oos"]))
+    items.sort(key=SORT_KEYS[sort], reverse=(dir == "desc"))
     total = len(items)
     page = items[offset:offset + limit]
     return {"count": total, "returned": len(page), "offset": offset, "limit": limit, "items": page}
@@ -434,7 +472,7 @@ async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
         LIMIT ?
     """, (product_code, days)).fetchall()
     meta = con.execute("""
-        SELECT product_name, partner_code, category FROM oos_daily WHERE product_code = ? LIMIT 1
+        SELECT product_name, partner_code, category, source_type FROM oos_daily WHERE product_code = ? LIMIT 1
     """, (product_code,)).fetchone()
     con.close()
     if not meta:
@@ -446,6 +484,7 @@ async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
         "product_name": meta["product_name"],
         "partner_code": meta["partner_code"],
         "category": meta["category"],
+        "source_type": meta["source_type"],
         "days_oos": days_oos,
         "first_oos_date": oos_dates[0] if oos_dates else None,
         "last_oos_date": oos_dates[-1] if oos_dates else None,

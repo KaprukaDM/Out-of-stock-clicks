@@ -1,5 +1,5 @@
 const PAGE_SIZE = 200;
-const state = { items: [], offset: 0, total: 0 };
+const state = { items: [], offset: 0, total: 0, sort: 'oos_views', dir: 'desc' };
 
 const el = (id) => document.getElementById(id);
 
@@ -46,8 +46,11 @@ function buildQuery() {
   if (el('endDate').value) params.set('end', el('endDate').value);
   if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
   if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
+  if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
   if (el('interestFilter').value) params.set('interest', el('interestFilter').value);
   if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
+  params.set('sort', state.sort);
+  params.set('dir', state.dir);
   params.set('limit', PAGE_SIZE);
   params.set('offset', state.offset);
   return params.toString();
@@ -109,6 +112,29 @@ function renderTable() {
   });
 }
 
+function renderSortIndicators() {
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.sort === state.sort) {
+      th.classList.add(state.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+    }
+  });
+}
+
+document.querySelectorAll('th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (state.sort === key) {
+      state.dir = state.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.sort = key;
+      state.dir = 'desc';
+    }
+    renderSortIndicators();
+    loadProducts();
+  });
+});
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -128,9 +154,11 @@ async function openTrend(productCode) {
     return;
   }
 
+  const sourceLabel = data.source_type === 'partner_central' ? 'Partner Central' : 'Ecommerce';
   el('trendTitle').textContent = data.product_name || data.product_code;
   el('trendMeta').innerHTML = `
     <span>Code: <strong>${escapeHtml(data.product_code)}</strong></span>
+    <span>Source: <strong>${sourceLabel}</strong></span>
     <span>Partner: <strong>${escapeHtml(data.partner_code || '—')}</strong></span>
     <span>Category: <strong>${escapeHtml(data.category || '—')}</strong></span>
     <span>Days OOS: <strong>${data.days_oos}</strong></span>
@@ -204,7 +232,7 @@ function drawTrend(series) {
     });
   }
 
-  drawLine('oos_views', '#ff3b30');
+  drawLine('oos_views', '#f85606');
 
   // x-axis labels (sparse)
   ctx.fillStyle = '#86868b';
@@ -245,6 +273,7 @@ el('refreshBtn').addEventListener('click', async () => {
 
 (async function init() {
   defaultDates();
+  renderSortIndicators();
   await loadFilters();
   await loadStatus();
   await loadProducts();

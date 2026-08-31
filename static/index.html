@@ -35,6 +35,14 @@
         <select id="partnerFilter"><option value="">All partners</option></select>
       </div>
       <div class="filter-group">
+        <label>Source</label>
+        <select id="sourceFilter">
+          <option value="">Partner Central + Ecommerce</option>
+          <option value="partner_central">Partner Central</option>
+          <option value="ecommerce">Ecommerce</option>
+        </select>
+      </div>
+      <div class="filter-group">
         <label>Interest</label>
         <select id="interestFilter">
           <option value="">All levels</option>
@@ -72,14 +80,14 @@
       <table id="productsTable">
         <thead>
           <tr>
-            <th>Interest</th>
-            <th>Product Code</th>
-            <th>Product Name</th>
-            <th>Partner</th>
-            <th>Category</th>
-            <th>OOS Views</th>
-            <th>Days OOS</th>
-            <th>First / Last OOS</th>
+            <th class="sortable" data-sort="interest">Interest</th>
+            <th class="sortable" data-sort="product_code">Product Code</th>
+            <th class="sortable" data-sort="product_name">Product Name</th>
+            <th class="sortable" data-sort="partner_code">Partner</th>
+            <th class="sortable" data-sort="category">Category</th>
+            <th class="sortable" data-sort="oos_views">OOS Views</th>
+            <th class="sortable" data-sort="days_oos">Days OOS</th>
+            <th class="sortable" data-sort="last_oos_date">First / Last OOS</th>
           </tr>
         </thead>
         <tbody id="productsBody">
