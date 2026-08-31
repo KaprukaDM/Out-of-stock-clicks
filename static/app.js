@@ -232,7 +232,7 @@ function drawTrend(series) {
     });
   }
 
-  drawLine('oos_views', '#f85606');
+  drawLine('oos_views', '#3d2166');
 
   // x-axis labels (sparse)
   ctx.fillStyle = '#86868b';
