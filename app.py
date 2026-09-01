@@ -84,6 +84,41 @@ CATEGORY_CODE_RE = re.compile(r"^ef_pc_([a-z]+?)0v\d+", re.IGNORECASE)
 # alphabetic run is the closest thing to a category GA4 gives us for these.
 ECOMMERCE_CATEGORY_RE = re.compile(r"^([a-z]+)\d", re.IGNORECASE)
 
+# Partner Central codes only ever carry the SHORT abbreviated form of a
+# category (groc, phar, cosm, ...); ecommerce codes carry the full word
+# (grocery, pharmacy, cosmetics, ...). Without this map the two sides never
+# collide even though they're the same category - "groc" and "grocery" would
+# sit as two separate filter options. Maps every known PC abbreviation to
+# the canonical (ecommerce-style) full word so both sources merge into one
+# category. Extend this as new ef_pc_ abbreviations show up.
+CATEGORY_ALIASES = {
+    "groc": "grocery",
+    "phar": "pharmacy",
+    "cosm": "cosmetics",
+    "jewe": "jewellery",
+    "jewllery": "jewellery",
+    "spor": "sportsitem",
+    "clot": "clothing",
+    "bicy": "bicycle",
+    "flow": "flowers",
+    "perf": "perfume",
+    "gift": "giftset",
+    "hamp": "cphamper",
+    "choc": "chocolates",
+    "auto": "automobile",
+}
+# flow -> flowers, gift -> giftset, jewe -> jewellery are deliberate general
+# merges even though other ecommerce variants exist (flowerswre, giftv/
+# giftvoucher/giftwrap, jewelleryf/mh/rj/s/w) - those look like sub-brands
+# or seller-specific codes under the same umbrella, not different
+# categories, so they're left unmapped rather than guessed into one bucket.
+
+
+def normalize_category(category: str | None) -> str | None:
+    if not category:
+        return category
+    return CATEGORY_ALIASES.get(category.lower(), category.lower())
+
 app = FastAPI(title="Kapruka Out-of-Stock Dashboard")
 
 _resolved_dims: dict[str, str] = {}
@@ -179,9 +214,9 @@ def extract_category(product_code: str) -> str | None:
         return None
     m = CATEGORY_CODE_RE.match(product_code)
     if m:
-        return m.group(1)
+        return normalize_category(m.group(1))
     m = ECOMMERCE_CATEGORY_RE.match(product_code)
-    return m.group(1).lower() if m else None
+    return normalize_category(m.group(1)) if m else None
 
 
 def extract_source_type(product_code: str) -> str:

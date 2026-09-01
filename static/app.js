@@ -256,8 +256,20 @@ el('trendModal').addEventListener('click', (e) => {
   if (e.target === el('trendModal')) el('trendModal').classList.remove('open');
 });
 
-el('applyBtn').addEventListener('click', loadProducts);
-el('searchBox').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadProducts(); });
+// Filters auto-apply: every select fires immediately on change, the search
+// box debounces so it doesn't re-query on every keystroke.
+['startDate', 'endDate', 'categoryFilter', 'partnerFilter', 'sourceFilter', 'interestFilter'].forEach(id => {
+  el(id).addEventListener('change', () => loadProducts());
+});
+
+let searchDebounce;
+el('searchBox').addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => loadProducts(), 400);
+});
+el('searchBox').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { clearTimeout(searchDebounce); loadProducts(); }
+});
 
 el('refreshBtn').addEventListener('click', async () => {
   const btn = el('refreshBtn');
@@ -272,7 +284,7 @@ el('refreshBtn').addEventListener('click', async () => {
     alert('Refresh failed: ' + e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = '↻ Refresh from GA4';
+    btn.textContent = '↻ Refresh Data';
   }
 });
 
