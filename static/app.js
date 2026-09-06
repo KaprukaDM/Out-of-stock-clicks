@@ -1,5 +1,5 @@
 const PAGE_SIZE = 200;
-const state = { items: [], offset: 0, total: 0, sort: 'oos_views', dir: 'desc' };
+const state = { items: [], offset: 0, total: 0, sort: 'oos_views', dir: 'desc', recency: null };
 
 const el = (id) => document.getElementById(id);
 
@@ -37,7 +37,24 @@ async function loadStatus() {
     bar.textContent = 'No data yet — click "Refresh from GA4" to pull the latest out-of-stock events.';
     return;
   }
-  bar.textContent = `${s.products} products tracked · data ${s.min_date} → ${s.max_date} · last refreshed ${s.last_updated || '—'}`;
+  bar.textContent = `${s.products} products tracked (${s.active_products} active in the last ${s.recency_days} day${s.recency_days === 1 ? '' : 's'}) · data ${s.min_date} → ${s.max_date} · last refreshed ${s.last_updated || '—'}`;
+}
+
+// The recency gate is applied server-side to every view and to the export;
+// this just explains why a product the user expected to see isn't listed.
+function renderRecencyNote(r) {
+  const note = el('recencyNote');
+  state.recency = r || null;
+  if (!r) { note.hidden = true; return; }
+  note.hidden = false;
+  note.classList.toggle('recency-stale', !!r.data_stale);
+  const hidden = r.hidden_stale
+    ? ` ${r.hidden_stale.toLocaleString()} product${r.hidden_stale === 1 ? '' : 's'} with hits inside the date range ${r.hidden_stale === 1 ? 'was' : 'were'} hidden as no longer active.`
+    : '';
+  const stale = r.data_stale
+    ? ` ⚠️ Latest synced data is ${r.latest_data_date}, older than the cutoff — click “Refresh Data” to pull the newest GA4 days.`
+    : '';
+  note.innerHTML = `🕒 <strong>Showing only still-active products</strong> — at least one out-of-stock hit on or after <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}, counted back from today).${hidden}${stale}`;
 }
 
 function buildFilterParams() {
@@ -68,6 +85,7 @@ async function loadProducts(resetPage = true) {
   const data = await fetch(`/api/products?${buildQuery()}`).then(r => r.json());
   state.items = data.items || [];
   state.total = data.count || 0;
+  renderRecencyNote(data.recency);
   renderTable();
   renderPagination();
 }
@@ -96,7 +114,10 @@ function interestPill(level) {
 function renderTable() {
   const body = el('productsBody');
   if (state.items.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="empty-state">No products match these filters.</td></tr>';
+    const gate = state.recency
+      ? ` Products with no out-of-stock hits since ${state.recency.cutoff} (last ${state.recency.days} day${state.recency.days === 1 ? '' : 's'}) are excluded.`
+      : '';
+    body.innerHTML = `<tr><td colspan="8" class="empty-state">No products match these filters.${escapeHtml(gate)}</td></tr>`;
     return;
   }
   body.innerHTML = state.items.map(item => `

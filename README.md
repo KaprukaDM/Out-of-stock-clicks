@@ -26,6 +26,18 @@ button (pulls the last 30 days).
   stray OOS hits on a page nobody visits isn't)
 - **Search** — product code or name
 
+**Always-on recency gate:** a product code only appears in the report if it
+had at least one `out_of_stock_view` in the **last 2 calendar days counted
+back from today** (i.e. today + yesterday; cutoff shown in the note above the
+table). This is anchored to *today*, not to the end of the selected date
+range — the range still decides which hits are counted, the gate decides
+which products are still worth acting on. Applied once in
+`fetch_filtered_products()`, so the table, the pagination total and the
+export all agree. Widen it with `RECENCY_GATE_DAYS` in `.env` if GA4 syncs
+run less often than daily (GA4 itself lags ~1 day, and the refresh only
+pulls up to yesterday, so an un-refreshed dashboard will legitimately show
+an empty report — the note turns red and says so).
+
 Each row also shows **days OOS** (days in the selected window with at least
 one out_of_stock_view event — a GA4-visit proxy, not a direct inventory
 feed) and the first/last date the event was seen. Clicking a row opens a

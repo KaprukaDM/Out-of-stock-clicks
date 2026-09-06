@@ -134,6 +134,23 @@ select:focus, input:focus { border-color: var(--accent); }
 
 .status-bar { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; padding: 0 4px; }
 
+/* Recency gate explainer - why an in-range product may not be listed. */
+.recency-note {
+  background: var(--accent-bg);
+  border: 1px solid rgba(61,33,102,0.14);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 14px;
+}
+.recency-note.recency-stale {
+  background: var(--red-bg);
+  border-color: #f7c9c5;
+  color: #a3352d;
+}
+
 .pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 18px; font-size: 13px; color: var(--text-secondary); }
 .pagination button { min-width: 90px; }
 

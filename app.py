@@ -36,6 +36,15 @@ no daily ingest script needed, unlike hygiene-dashboard.
 the selected window where the product had at least one out_of_stock_view
 event. GA4 has no direct inventory feed, so a day with zero site traffic to
 an OOS product isn't counted even if it was still unavailable that day.
+
+Recency gate: the report only ever lists products that are *still* going out
+of stock. A product code needs at least one out_of_stock_view dated within
+the last RECENCY_GATE_DAYS (default 2) calendar days, counted back from
+TODAY (server local date) - NOT from the end of the selected date range. The
+date range still governs which hits are counted/aggregated; the gate only
+decides which product codes survive into the report at all. See
+recency_cutoff_date() / fetch_filtered_products() for the implementation and
+the GA4-lag caveat.
 """
 from __future__ import annotations
 
@@ -72,6 +81,12 @@ PRODUCT_NAME_DISPLAY_NAME = os.environ.get("PRODUCT_NAME_DIMENSION_LABEL", "Cust
 PRODUCT_CODE_API_NAME = os.environ.get("PRODUCT_CODE_API_NAME", "customEvent:custom_param1")
 PRODUCT_NAME_API_NAME = os.environ.get("PRODUCT_NAME_API_NAME", "customEvent:custom_param2")
 OOS_EVENT_NAME = os.environ.get("OOS_EVENT_NAME", "out_of_stock_view")
+
+# Recency gate (see module docstring): how many calendar days back from today
+# a product must have had an out_of_stock_view hit to appear in the report at
+# all. 2 = today + yesterday. Env-overridable so the VPS can widen it without
+# a code change if GA4 refreshes fall behind.
+RECENCY_GATE_DAYS = max(1, int(os.environ.get("RECENCY_GATE_DAYS", "2")))
 
 # Partner Central product codes look like ef_pc_<category>0v<partner#><pod|p><product#>[p]
 # e.g. ef_pc_home0v2057pod00141p -> category "home", partner "v02057" (zero-padded to 5 digits)
@@ -460,13 +475,41 @@ SORT_KEYS = {
 }
 
 
+def recency_cutoff_date(days: int = RECENCY_GATE_DAYS) -> str:
+    """Earliest date that still counts as "recent", anchored to TODAY.
+
+    days=2 -> today and yesterday (2 calendar days, inclusive of today), i.e.
+    cutoff = today - 1 day. Deliberately anchored to the server's current
+    date, not to the selected range's end date: the point of the gate is
+    "is this product still going out of stock right now", so browsing an
+    older date range must not resurrect products that went quiet since.
+    Calendar days rather than a rolling 48h because oos_daily only stores
+    date-granularity rows - there are no event timestamps to do better.
+    """
+    from datetime import date, timedelta
+    return (date.today() - timedelta(days=max(1, days) - 1)).isoformat()
+
+
+def active_product_codes(con: sqlite3.Connection, cutoff: str) -> set[str]:
+    """Product codes with at least one out_of_stock_view on/after `cutoff`."""
+    rows = con.execute(
+        "SELECT DISTINCT product_code FROM oos_daily WHERE date >= ? AND oos_views > 0",
+        (cutoff,),
+    ).fetchall()
+    return {r["product_code"] for r in rows}
+
+
 def fetch_filtered_products(
     start: str | None, end: str | None, category: str | None, partner: str | None,
     source: str | None, q: str | None, interest: str | None,
     sort: str, dir: str,
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """Shared by /api/products (paginated) and /api/export (full CSV) so the
-    export always matches exactly what the table's current filters show."""
+    export always matches exactly what the table's current filters show.
+
+    Returns (items, recency_meta). Every product code in `items` has passed
+    the recency gate, so both the table and the export apply it identically.
+    """
     con = db()
     query = """SELECT product_code, MAX(product_name) product_name,
                       MAX(partner_code) partner_code, MAX(category) category,
@@ -498,6 +541,10 @@ def fetch_filtered_products(
     query += " GROUP BY product_code"
 
     rows = con.execute(query, params).fetchall()
+
+    cutoff = recency_cutoff_date()
+    active = active_product_codes(con, cutoff)
+    latest_data_date = con.execute("SELECT MAX(date) d FROM oos_daily").fetchone()["d"]
     con.close()
 
     items = [{
@@ -512,6 +559,25 @@ def fetch_filtered_products(
         "last_oos_date": r["last_oos_date"],
     } for r in rows]
 
+    # Recency gate BEFORE scoring: a stale product isn't part of the report at
+    # all, so it must not influence the interest percentiles either. The date
+    # range still decides which hits were summed above - the gate only drops
+    # whole product codes that have gone quiet in the last RECENCY_GATE_DAYS.
+    matched_before_gate = len(items)
+    items = [i for i in items if i["product_code"] in active]
+    recency = {
+        "days": RECENCY_GATE_DAYS,
+        "cutoff": cutoff,
+        "hidden_stale": matched_before_gate - len(items),
+        "matched_before_gate": matched_before_gate,
+        "latest_data_date": latest_data_date,
+        # True when the DB itself has no data as recent as the cutoff (e.g.
+        # nobody has hit "Refresh from GA4" for a few days, or GA4's own
+        # ~1-day reporting lag) - in that case the report is empty because
+        # the data is stale, not because every product came back in stock.
+        "data_stale": bool(latest_data_date and latest_data_date < cutoff),
+    }
+
     # Interest is percentile-based within this filtered set (category/partner/
     # source/date/search), so it's computed BEFORE the interest filter itself
     # is applied - filtering first would re-percentile an already-filtered
@@ -523,7 +589,7 @@ def fetch_filtered_products(
         items = [i for i in items if i["interest"] == interest]
 
     items.sort(key=SORT_KEYS[sort], reverse=(dir == "desc"))
-    return items
+    return items, recency
 
 
 @app.get("/api/products")
@@ -540,10 +606,15 @@ async def api_products(
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
-    items = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
+    items, recency = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
+    # `count` is the post-gate total, so pagination and any "N products"
+    # summary reflect exactly the rows the report actually contains.
     total = len(items)
     page = items[offset:offset + limit]
-    return {"count": total, "returned": len(page), "offset": offset, "limit": limit, "items": page}
+    return {
+        "count": total, "returned": len(page), "offset": offset, "limit": limit,
+        "items": page, "recency": recency,
+    }
 
 
 @app.get("/api/export")
@@ -558,7 +629,9 @@ async def api_export(
     sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
 ):
-    items = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
+    # Same call as /api/products, so the CSV is exactly the gated+filtered set
+    # the table shows; the recency meta itself is UI-only, hence discarded.
+    items, _ = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
 
     import csv
     import io
@@ -620,8 +693,16 @@ async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
 async def api_status():
     con = db()
     row = con.execute("SELECT MAX(updated_at) last_updated, COUNT(DISTINCT product_code) products, MIN(date) min_date, MAX(date) max_date FROM oos_daily").fetchone()
+    cutoff = recency_cutoff_date()
+    active = len(active_product_codes(con, cutoff))
     con.close()
-    return dict(row) if row else {}
+    out = dict(row) if row else {}
+    # `products` is every code ever synced; `active_products` is the subset
+    # that passes the recency gate and can therefore appear in the report.
+    out["active_products"] = active
+    out["recency_days"] = RECENCY_GATE_DAYS
+    out["recency_cutoff"] = cutoff
+    return out
 
 
 # ------------------------------------------------------------------ static
