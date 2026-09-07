@@ -188,15 +188,14 @@ tbody tr:hover { background: var(--accent-bg); }
 tbody tr:last-child td { border-bottom: none; }
 
 /* Fixed layout needs explicit widths per column, in table order:
-   Interest, Product Code, Product Name, Partner, Category, OOS Views, Days OOS, First/Last OOS */
-th:nth-child(1), td:nth-child(1) { width: 100px; }
-th:nth-child(2), td:nth-child(2) { width: 200px; }
-th:nth-child(3), td:nth-child(3) { width: 280px; white-space: normal; }
+   Product Code, Product Name, Partner, Category, OOS Views, Days OOS, First/Last OOS */
+th:nth-child(1), td:nth-child(1) { width: 240px; }
+th:nth-child(2), td:nth-child(2) { width: 320px; white-space: normal; }
+th:nth-child(3), td:nth-child(3) { width: 110px; }
 th:nth-child(4), td:nth-child(4) { width: 110px; }
-th:nth-child(5), td:nth-child(5) { width: 110px; }
-th:nth-child(6), td:nth-child(6) { width: 100px; }
-th:nth-child(7), td:nth-child(7) { width: 90px; }
-th:nth-child(8), td:nth-child(8) { width: 190px; }
+th:nth-child(5), td:nth-child(5) { width: 100px; }
+th:nth-child(6), td:nth-child(6) { width: 90px; }
+th:nth-child(7), td:nth-child(7) { width: 190px; }
 
 .empty-state { text-align: center; padding: 60px 20px !important; color: var(--text-tertiary); cursor: default; }
 
@@ -220,20 +219,6 @@ th:nth-child(8), td:nth-child(8) { width: 190px; }
   color: var(--accent);
   text-transform: capitalize;
 }
-
-.interest-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border-radius: 980px;
-  font-size: 12px;
-  font-weight: 700;
-}
-.interest-high { background: var(--red-bg); color: var(--red); }
-.interest-medium { background: var(--orange-bg); color: var(--orange); }
-.interest-low { background: var(--grey-bg); color: var(--text-tertiary); }
-.interest-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
 .num { font-variant-numeric: tabular-nums; font-weight: 500; }
 .dates-cell { font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }

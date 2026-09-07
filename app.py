@@ -5,8 +5,8 @@ Kapruka Out-of-Stock Dashboard - backend.
 Pulls the GA4 `out_of_stock_view` event (fired when a shopper lands on a
 product page that is marked out of stock).
 
-Interest scoring is based on out_of_stock_view event count alone. We looked
-for a way to cross-reference regular page-view traffic per product (to tell
+Demand signal: out_of_stock_view event count, and only that. We looked for a
+way to cross-reference regular page-view traffic per product (to tell
 "nobody wants this anyway" apart from "people keep showing up for a product
 they can't buy") but custom_param1/2 are event-scoped params that GA4 only
 ever populates on out_of_stock_view - they come back "(not set)" on
@@ -15,8 +15,11 @@ totalUsers on this event is also stuck at 1 even for products with 2000+
 events, which points at a client_id/user_id gap in how the event is tagged
 rather than 2000 real repeat visits - worth fixing at the source in GTM/GA4,
 but out of scope here. Event count is therefore the only real signal
-available; the UI surfaces this caveat rather than hiding it behind a score
-that looks more precise than the underlying data supports.
+available, and it is reported raw (the OOS Views column). There used to be a
+derived High/Medium/Low "Interest" column bucketing products by percentile
+of that same count; it was removed on request, since it added no information
+the raw count didn't already carry. Don't reintroduce a score - and
+especially not a page-view ratio - the data can't support.
 
 Custom dimensions: GA4 only exposes registered custom dimensions by their
 *display name* in the UI ("Custom Parameter1", "Custom Param 2 Dimention")
@@ -375,42 +378,6 @@ async def refresh_from_ga4(days: int = 30) -> dict:
     return {"ok": True, "rows_upserted": n, "date_range": {"start": start_s, "end": end_s}}
 
 
-# ------------------------------------------------------------------ scoring
-def assign_interest_levels(items: list[dict]) -> None:
-    """High/medium/low interest = out_of_stock_view demand signal, relative to
-    the current result set (top ~20% high, next ~30% medium, rest low).
-
-    Based on event count alone (see module docstring for why page views and
-    totalUsers aren't usable here). Percentile thresholds are computed live
-    off whatever's in `items` rather than hardcoded absolute counts: OOS
-    event volume varies a lot by category/date-range/filter, so a fixed
-    "30 events = high" threshold either flags almost everything as high (as
-    it did against the full catalog, where the median product already had
-    ~44 events) or almost nothing once someone filters down to one category.
-    Mutates each item in place, adding an "interest" key.
-    """
-    if not items:
-        return
-    views_sorted = sorted(i["oos_views"] for i in items)
-    n = len(views_sorted)
-
-    def percentile(p: float) -> float:
-        idx = min(n - 1, int(n * p))
-        return views_sorted[idx]
-
-    high_cut = percentile(0.80)
-    medium_cut = percentile(0.50)
-
-    for item in items:
-        v = item["oos_views"]
-        if v > high_cut:
-            item["interest"] = "high"
-        elif v > medium_cut:
-            item["interest"] = "medium"
-        else:
-            item["interest"] = "low"
-
-
 # ------------------------------------------------------------------ API
 @app.post("/api/refresh")
 async def api_refresh(days: int = Query(30, ge=1, le=90)):
@@ -471,7 +438,6 @@ SORT_KEYS = {
     "days_oos": lambda i: i["days_oos"],
     "first_oos_date": lambda i: (i["first_oos_date"] or ""),
     "last_oos_date": lambda i: (i["last_oos_date"] or ""),
-    "interest": lambda i: {"low": 0, "medium": 1, "high": 2}[i["interest"]],
 }
 
 
@@ -501,7 +467,7 @@ def active_product_codes(con: sqlite3.Connection, cutoff: str) -> set[str]:
 
 def fetch_filtered_products(
     start: str | None, end: str | None, category: str | None, partner: str | None,
-    source: str | None, q: str | None, interest: str | None,
+    source: str | None, q: str | None,
     sort: str, dir: str,
 ) -> tuple[list[dict], dict]:
     """Shared by /api/products (paginated) and /api/export (full CSV) so the
@@ -559,8 +525,7 @@ def fetch_filtered_products(
         "last_oos_date": r["last_oos_date"],
     } for r in rows]
 
-    # Recency gate BEFORE scoring: a stale product isn't part of the report at
-    # all, so it must not influence the interest percentiles either. The date
+    # Recency gate: a stale product isn't part of the report at all. The date
     # range still decides which hits were summed above - the gate only drops
     # whole product codes that have gone quiet in the last RECENCY_GATE_DAYS.
     matched_before_gate = len(items)
@@ -578,16 +543,6 @@ def fetch_filtered_products(
         "data_stale": bool(latest_data_date and latest_data_date < cutoff),
     }
 
-    # Interest is percentile-based within this filtered set (category/partner/
-    # source/date/search), so it's computed BEFORE the interest filter itself
-    # is applied - filtering first would re-percentile an already-filtered
-    # set, which is circular (e.g. filtering to "low" would always leave ~50%
-    # of what's left relabelled "high").
-    assign_interest_levels(items)
-
-    if interest:
-        items = [i for i in items if i["interest"] == interest]
-
     items.sort(key=SORT_KEYS[sort], reverse=(dir == "desc"))
     return items, recency
 
@@ -599,14 +554,13 @@ async def api_products(
     category: str | None = None,
     partner: str | None = None,
     source: str | None = None,
-    interest: str | None = None,
     q: str | None = None,
     sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
-    items, recency = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
+    items, recency = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
     # `count` is the post-gate total, so pagination and any "N products"
     # summary reflect exactly the rows the report actually contains.
     total = len(items)
@@ -624,27 +578,27 @@ async def api_export(
     category: str | None = None,
     partner: str | None = None,
     source: str | None = None,
-    interest: str | None = None,
     q: str | None = None,
     sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
 ):
     # Same call as /api/products, so the CSV is exactly the gated+filtered set
     # the table shows; the recency meta itself is UI-only, hence discarded.
-    items, _ = fetch_filtered_products(start, end, category, partner, source, q, interest, sort, dir)
+    items, _ = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
 
     import csv
     import io
     buf = io.StringIO()
     writer = csv.writer(buf)
+    # Column order mirrors the dashboard table exactly.
     writer.writerow([
-        "Interest", "Product Code", "Product Name", "Partner Code", "Category",
+        "Product Code", "Product Name", "Partner Code", "Category",
         "Source", "OOS Views", "Days OOS", "First OOS Date", "Last OOS Date",
     ])
     source_labels = {"partner_central": "Partner Central", "ecommerce": "Ecommerce"}
     for i in items:
         writer.writerow([
-            i["interest"], i["product_code"], i["product_name"] or "",
+            i["product_code"], i["product_name"] or "",
             i["partner_code"] or "", i["category"] or "",
             source_labels.get(i["source_type"], i["source_type"] or ""),
             i["oos_views"], i["days_oos"],

@@ -64,7 +64,6 @@ function buildFilterParams() {
   if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
   if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
   if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
-  if (el('interestFilter').value) params.set('interest', el('interestFilter').value);
   if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
   params.set('sort', state.sort);
   params.set('dir', state.dir);
@@ -81,7 +80,7 @@ function buildQuery() {
 async function loadProducts(resetPage = true) {
   if (resetPage) state.offset = 0;
   const body = el('productsBody');
-  body.innerHTML = '<tr><td colspan="8" class="empty-state">Loading…</td></tr>';
+  body.innerHTML = '<tr><td colspan="7" class="empty-state">Loading…</td></tr>';
   const data = await fetch(`/api/products?${buildQuery()}`).then(r => r.json());
   state.items = data.items || [];
   state.total = data.count || 0;
@@ -106,23 +105,17 @@ function renderPagination() {
   if (next) next.addEventListener('click', () => { state.offset += PAGE_SIZE; loadProducts(false); });
 }
 
-function interestPill(level) {
-  const labels = { high: '🔴 High', medium: '🟠 Medium', low: '⚪ Low' };
-  return `<span class="interest-pill interest-${level}">${labels[level] || level}</span>`;
-}
-
 function renderTable() {
   const body = el('productsBody');
   if (state.items.length === 0) {
     const gate = state.recency
       ? ` Products with no out-of-stock hits since ${state.recency.cutoff} (last ${state.recency.days} day${state.recency.days === 1 ? '' : 's'}) are excluded.`
       : '';
-    body.innerHTML = `<tr><td colspan="8" class="empty-state">No products match these filters.${escapeHtml(gate)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="empty-state">No products match these filters.${escapeHtml(gate)}</td></tr>`;
     return;
   }
   body.innerHTML = state.items.map(item => `
     <tr data-code="${escapeAttr(item.product_code)}">
-      <td>${interestPill(item.interest)}</td>
       <td class="pc-code">${escapeHtml(item.product_code)}</td>
       <td>${escapeHtml(item.product_name || '—')}</td>
       <td>${item.partner_code ? `<span class="partner-badge">${escapeHtml(item.partner_code)}</span>` : '—'}</td>
@@ -279,7 +272,7 @@ el('trendModal').addEventListener('click', (e) => {
 
 // Filters auto-apply: every select fires immediately on change, the search
 // box debounces so it doesn't re-query on every keystroke.
-['startDate', 'endDate', 'categoryFilter', 'partnerFilter', 'sourceFilter', 'interestFilter'].forEach(id => {
+['startDate', 'endDate', 'categoryFilter', 'partnerFilter', 'sourceFilter'].forEach(id => {
   el(id).addEventListener('change', () => loadProducts());
 });
 

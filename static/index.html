@@ -48,15 +48,6 @@
           <option value="ecommerce">Ecommerce</option>
         </select>
       </div>
-      <div class="filter-group">
-        <label>Interest</label>
-        <select id="interestFilter">
-          <option value="">All levels</option>
-          <option value="high">🔴 High</option>
-          <option value="medium">🟠 Medium</option>
-          <option value="low">⚪ Low</option>
-        </select>
-      </div>
       <div class="filter-group grow">
         <label>Search</label>
         <input type="text" id="searchBox" placeholder="Product code or name…">
@@ -72,12 +63,12 @@
     </div>
 
     <div class="caveat-banner">
-      ⚠️ <strong>Interest is based on out_of_stock_view event count only.</strong>
+      ⚠️ <strong>OOS Views counts out_of_stock_view events, not unique shoppers.</strong>
       GA4's per-product custom parameters aren't set on regular page views, and
       <code>totalUsers</code> on this event is stuck at 1 even for products with
       thousands of hits — a tagging gap, not thousands of repeat visits. Counts
-      may include bot/retry traffic; treat interest levels as directional, and
-      consider fixing the event's user/session identification at the source.
+      may include bot/retry traffic; treat them as directional, and consider
+      fixing the event's user/session identification at the source.
     </div>
 
     <div class="status-bar" id="statusBar"></div>
@@ -88,7 +79,6 @@
       <table id="productsTable">
         <thead>
           <tr>
-            <th class="sortable" data-sort="interest">Interest</th>
             <th class="sortable" data-sort="product_code">Product Code</th>
             <th class="sortable" data-sort="product_name">Product Name</th>
             <th class="sortable" data-sort="partner_code">Partner</th>
@@ -99,7 +89,7 @@
           </tr>
         </thead>
         <tbody id="productsBody">
-          <tr><td colspan="8" class="empty-state">Loading…</td></tr>
+          <tr><td colspan="7" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
     </div>

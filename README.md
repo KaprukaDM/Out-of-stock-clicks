@@ -20,11 +20,13 @@ button (pulls the last 30 days).
 - **Partner code** — Partner Central products embed a partner code in the
   product code, e.g. `ef_pc_home0v2057pod00141p` → partner `v02057`. GA4 has
   no partner *name* dimension, so partners are grouped/labelled by this code.
-- **Interest level** — 🔴 High / 🟠 Medium / ⚪ Low, based on out-of-stock view
-  volume plus the product's regular page-view volume (a product with heavy
-  OOS hits *and* a history of real traffic is "high interest"; a couple of
-  stray OOS hits on a page nobody visits isn't)
+- **Source** — Partner Central and/or Ecommerce (Kapruka's own catalog)
 - **Search** — product code or name
+
+Demand is reported as the raw **OOS Views** count. There is no derived
+"Interest" High/Medium/Low column — it was removed, since it only re-bucketed
+that same count by percentile and implied more precision than GA4 supports
+here (see the note on `totalUsers` in `app.py`'s docstring).
 
 **Always-on recency gate:** a product code only appears in the report if it
 had at least one `out_of_stock_view` in the **last 2 calendar days counted
