@@ -58,8 +58,18 @@ an empty report — the note turns red and says so).
 
 Each row also shows **days OOS** (days in the selected window with at least
 one out_of_stock_view event — a GA4-visit proxy, not a direct inventory
-feed) and the first/last date the event was seen. Clicking a row opens a
-trend chart of daily OOS views vs. page views for that product.
+feed) and the first/last date the event was seen.
+
+Clicking a row opens a **bar chart of daily out-of-stock views** for that
+product — one bar per calendar day (date on X, event count on Y), hover for
+the exact day and count. The series is zero-filled across the window, so a
+quiet day is a visible gap: `oos_daily` only holds days GA4 returned events
+for, and the old line chart joined 08-01 straight to 08-10 as if they were
+consecutive. A missing bar means no `out_of_stock_view` was recorded that
+day — back in stock, or just no traffic to the page. (There is no page-view
+series to plot alongside it; see the top of `app.py` for why.) The window is
+the last 90 days ending at that product's *own* last out-of-stock date, not
+at today, so a recovered product still shows its outage.
 
 ## Tabs: "Still out of stock" / "Back in stock"
 

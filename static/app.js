@@ -346,6 +346,12 @@ async function openTrend(productCode) {
 
   const sourceLabel = data.source_type === 'partner_central' ? 'Partner Central' : 'Ecommerce';
   el('trendTitle').textContent = data.product_name || data.product_code;
+  // The chart window is capped (90 days), so say so when it doesn't cover the
+  // product's whole first→last span - otherwise the bars silently disagree
+  // with the First/Last OOS dates right above them.
+  const charted = (data.series && data.series.length && data.series[0].date !== data.first_oos_date)
+    ? `<span>Chart: <strong>last ${data.series.length} days</strong> to ${data.last_oos_date}</span>`
+    : '';
   el('trendMeta').innerHTML = `
     <span>Code: <strong>${escapeHtml(data.product_code)}</strong></span>
     <span>Source: <strong>${sourceLabel}</strong></span>
@@ -353,10 +359,20 @@ async function openTrend(productCode) {
     <span>Category: <strong>${escapeHtml(data.category || '—')}</strong></span>
     <span>Days OOS: <strong>${data.days_oos}</strong></span>
     <span>First/Last OOS: <strong>${data.first_oos_date || '—'} → ${data.last_oos_date || '—'}</strong></span>
+    ${charted}
   `;
 
   drawTrend(data.series || []);
 }
+
+// One bar per calendar day: date on X, out-of-stock event count on Y. The
+// series the API returns is zero-filled across the window, so every day gets
+// its own slot and a quiet day shows as a gap instead of the old line's
+// straight hop between two non-adjacent dates (08-01 → 08-10 read as
+// consecutive). Kept as hand-drawn canvas to match the rest of the app — no
+// chart library.
+let trendBars = [];   // hit-test boxes for the hover readout
+let trendSeries = [];
 
 function drawTrend(series) {
   const canvas = el('trendCanvas');
@@ -368,73 +384,122 @@ function drawTrend(series) {
   canvas.height = h * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
+  trendBars = [];
+  trendSeries = series;
 
   if (series.length === 0) {
     ctx.fillStyle = '#86868b';
     ctx.font = '14px DM Sans, sans-serif';
-    ctx.fillText('No data in range', 20, 30);
+    ctx.fillText('No out-of-stock events recorded for this product', 20, 30);
     return;
   }
 
-  const padding = { top: 20, right: 20, bottom: 30, left: 44 };
+  const padding = { top: 20, right: 20, bottom: 34, left: 44 };
   const chartW = w - padding.left - padding.right;
   const chartH = h - padding.top - padding.bottom;
-
   const maxVal = Math.max(...series.map(s => s.oos_views), 1);
 
-  // gridlines
-  ctx.strokeStyle = '#f2f2f7';
-  ctx.lineWidth = 1;
-  const gridLines = 4;
+  // Y gridlines + labels. Whole numbers only — these are event counts, so a
+  // "2.5 events" tick would be nonsense; duplicates are skipped when the max
+  // is smaller than the number of gridlines.
+  const gridLines = Math.min(4, maxVal);
+  ctx.font = '11px DM Sans, sans-serif';
+  ctx.textAlign = 'right';
+  const seen = new Set();
   for (let i = 0; i <= gridLines; i++) {
-    const y = padding.top + (chartH / gridLines) * i;
+    const val = Math.round(maxVal - (maxVal / gridLines) * i);
+    const y = padding.top + chartH - (val / maxVal) * chartH;
+    ctx.strokeStyle = '#f2f2f7';
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(padding.left, y);
     ctx.lineTo(w - padding.right, y);
     ctx.stroke();
-    const val = Math.round(maxVal - (maxVal / gridLines) * i);
-    ctx.fillStyle = '#86868b';
-    ctx.font = '11px DM Sans, sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(val, padding.left - 8, y + 4);
+    if (!seen.has(val)) {
+      seen.add(val);
+      ctx.fillStyle = '#86868b';
+      ctx.fillText(val, padding.left - 8, y + 4);
+    }
   }
 
-  const xStep = series.length > 1 ? chartW / (series.length - 1) : 0;
-  const xFor = (i) => padding.left + xStep * i;
+  // Bars: slot per day, with a small gap, floored at 1px so a day with a
+  // single event is still visible next to a 100-event spike.
+  const slot = chartW / series.length;
+  const gap = Math.min(4, Math.max(1, slot * 0.18));
+  const barW = Math.max(1, slot - gap);
   const yFor = (val) => padding.top + chartH - (val / maxVal) * chartH;
 
-  function drawLine(key, color) {
-    ctx.beginPath();
-    series.forEach((pt, i) => {
-      const x = xFor(i);
-      const y = yFor(pt[key]);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    series.forEach((pt, i) => {
+  series.forEach((pt, i) => {
+    const x = padding.left + slot * i + (slot - barW) / 2;
+    const top = yFor(pt.oos_views);
+    const barH = pt.oos_views > 0 ? Math.max(1, padding.top + chartH - top) : 0;
+    trendBars.push({ x, w: barW, slotX: padding.left + slot * i, slotW: slot, top, pt });
+    if (barH === 0) return;
+    ctx.fillStyle = '#3d2166';
+    if (barW > 3 && barH > 3) {
+      const r = Math.min(3, barW / 2);
       ctx.beginPath();
-      ctx.arc(xFor(i), yFor(pt[key]), 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = color;
+      ctx.moveTo(x, padding.top + chartH);
+      ctx.lineTo(x, top + r);
+      ctx.quadraticCurveTo(x, top, x + r, top);
+      ctx.lineTo(x + barW - r, top);
+      ctx.quadraticCurveTo(x + barW, top, x + barW, top + r);
+      ctx.lineTo(x + barW, padding.top + chartH);
+      ctx.closePath();
       ctx.fill();
-    });
-  }
+    } else {
+      ctx.fillRect(x, top, barW, barH);
+    }
+  });
 
-  drawLine('oos_views', '#3d2166');
+  // Baseline, so zero days read as "nothing here" rather than a missing axis.
+  ctx.strokeStyle = '#d2d2d7';
+  ctx.beginPath();
+  ctx.moveTo(padding.left, padding.top + chartH + 0.5);
+  ctx.lineTo(w - padding.right, padding.top + chartH + 0.5);
+  ctx.stroke();
 
-  // x-axis labels (sparse)
+  // X labels (sparse — one per ~8 slots, plus the last day). Min 40px apart,
+  // or the forced last label overprints the one before it on a dense chart.
   ctx.fillStyle = '#86868b';
   ctx.font = '11px DM Sans, sans-serif';
   ctx.textAlign = 'center';
   const labelEvery = Math.max(1, Math.ceil(series.length / 8));
+  let lastLabelX = -Infinity;
   series.forEach((pt, i) => {
-    if (i % labelEvery === 0 || i === series.length - 1) {
-      ctx.fillText(pt.date.slice(5), xFor(i), h - 8);
+    const isLast = i === series.length - 1;
+    if (i % labelEvery !== 0 && !isLast) return;
+    const x = padding.left + slot * i + slot / 2;
+    if (x - lastLabelX < 40) {
+      if (!isLast) return;
+      // Drop the regular label this one would collide with, keep the last day.
+      ctx.clearRect(lastLabelX - 24, h - 22, 48, 18);
     }
+    ctx.fillText(pt.date.slice(5), x, h - 10);
+    lastLabelX = x;
   });
 }
+
+// Hover readout: with up to 90 daily bars the exact date/count of one bar
+// isn't readable off the axis, and the whole point of the chart is which day
+// spiked.
+function trendHover(e) {
+  const canvas = el('trendCanvas');
+  const tip = el('trendTooltip');
+  if (!trendBars.length) { tip.hidden = true; return; }
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const bar = trendBars.find(b => x >= b.slotX && x < b.slotX + b.slotW);
+  if (!bar) { tip.hidden = true; return; }
+  tip.hidden = false;
+  tip.innerHTML = `<strong>${bar.pt.date}</strong><br>${bar.pt.oos_views.toLocaleString()} out-of-stock view${bar.pt.oos_views === 1 ? '' : 's'}`;
+  const tipW = tip.offsetWidth;
+  tip.style.left = `${Math.max(0, Math.min(rect.width - tipW, bar.slotX + bar.slotW / 2 - tipW / 2))}px`;
+  tip.style.top = `${Math.max(0, (bar.pt.oos_views > 0 ? bar.top : rect.height - 60) - 48)}px`;
+}
+
+el('trendCanvas').addEventListener('mousemove', trendHover);
+el('trendCanvas').addEventListener('mouseleave', () => { el('trendTooltip').hidden = true; });
 
 el('modalClose').addEventListener('click', () => el('trendModal').classList.remove('open'));
 el('trendModal').addEventListener('click', (e) => {

@@ -347,9 +347,27 @@ tbody tr:last-child td { border-bottom: none; }
 .trend-meta { font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; display: flex; gap: 16px; flex-wrap: wrap; }
 .trend-meta span strong { color: var(--text-primary); }
 
+.trend-chart { position: relative; }
 #trendCanvas { width: 100%; height: 360px; display: block; }
 
-.trend-legend { display: flex; gap: 20px; justify-content: center; margin-top: 12px; font-size: 13px; color: var(--text-secondary); }
+/* Hover readout for the daily bars - positioned over the canvas, so the
+   wrapper above is the positioning context. */
+.trend-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--text-primary);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 6px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+}
+
+.trend-legend { display: flex; gap: 20px; justify-content: center; align-items: center; flex-wrap: wrap; margin-top: 12px; font-size: 13px; color: var(--text-secondary); }
+.trend-legend .trend-note { color: var(--text-tertiary); font-size: 12px; }
+.trend-legend .trend-note code { background: var(--grey-bg); padding: 1px 5px; border-radius: 5px; }
 .trend-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; }
 .dot-oos { background: var(--accent); }
 

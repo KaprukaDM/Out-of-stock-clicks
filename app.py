@@ -1022,31 +1022,64 @@ async def api_export(
 
 @app.get("/api/trend/{product_code}")
 async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
+    """Daily out_of_stock_view counts for one product, for the modal's chart.
+
+    The series is zero-filled across every calendar day in the window, not
+    just the days that have rows. oos_daily only stores days GA4 returned
+    events for, so the raw rows skip quiet days entirely - plotted as-is they
+    put 08-01 next to 08-10 as if they were consecutive, which reads as a
+    continuous run and is the whole reason the chart is per-day bars now. A
+    zero day means "no out_of_stock_view recorded", which is either back in
+    stock or simply no traffic - the same GA4-visit-proxy caveat as days_oos.
+
+    The window is the last `days` calendar days ending at the product's own
+    last OOS date, not at today: a recovered product's outage can be weeks
+    old, and anchoring to today would show it an empty chart. (This also
+    replaces a `LIMIT days` on the rows, which silently returned the product's
+    *oldest* `days` rows once it had more than that.)
+    """
     con = db()
     rows = con.execute("""
         SELECT date, oos_views FROM oos_daily
-        WHERE product_code = ?
+        WHERE product_code = ? AND oos_views > 0
         ORDER BY date ASC
-        LIMIT ?
-    """, (product_code, days)).fetchall()
+    """, (product_code,)).fetchall()
     meta = con.execute("""
         SELECT product_name, partner_code, category, source_type FROM oos_daily WHERE product_code = ? LIMIT 1
     """, (product_code,)).fetchone()
     con.close()
     if not meta:
         raise HTTPException(status_code=404, detail="product not found")
-    days_oos = sum(1 for r in rows if r["oos_views"] > 0)
-    oos_dates = [r["date"] for r in rows if r["oos_views"] > 0]
+
+    from datetime import date, timedelta
+    by_date = {r["date"]: r["oos_views"] for r in rows}
+    oos_dates = sorted(by_date)
+    series = []
+    if oos_dates:
+        last_d = date.fromisoformat(oos_dates[-1])
+        first_d = date.fromisoformat(oos_dates[0])
+        # Never start before the first hit - no point padding a product's
+        # pre-history with zeros - but cap the span at `days` bars.
+        start_d = max(first_d, last_d - timedelta(days=days - 1))
+        d = start_d
+        while d <= last_d:
+            iso = d.isoformat()
+            series.append({"date": iso, "oos_views": by_date.get(iso, 0)})
+            d += timedelta(days=1)
+
     return {
         "product_code": product_code,
         "product_name": meta["product_name"],
         "partner_code": meta["partner_code"],
         "category": meta["category"],
         "source_type": meta["source_type"],
-        "days_oos": days_oos,
+        # Counted over the product's whole history, matching the table's
+        # Days OOS; the series may be clipped to the last `days` days.
+        "days_oos": len(oos_dates),
         "first_oos_date": oos_dates[0] if oos_dates else None,
         "last_oos_date": oos_dates[-1] if oos_dates else None,
-        "series": [{"date": r["date"], "oos_views": r["oos_views"]} for r in rows],
+        "window_days": len(series),
+        "series": series,
     }
 
 

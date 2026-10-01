@@ -147,9 +147,13 @@
       <button class="modal-close" id="modalClose">✕</button>
       <h2 id="trendTitle">Trend</h2>
       <div class="trend-meta" id="trendMeta"></div>
-      <canvas id="trendCanvas" width="900" height="360"></canvas>
+      <div class="trend-chart">
+        <canvas id="trendCanvas" width="900" height="360"></canvas>
+        <div class="trend-tooltip" id="trendTooltip" hidden></div>
+      </div>
       <div class="trend-legend">
-        <span><i class="dot dot-oos"></i> Out-of-stock views</span>
+        <span><i class="dot dot-oos"></i> Out-of-stock views per day</span>
+        <span class="trend-note">No bar = no <code>out_of_stock_view</code> recorded that day — back in stock, or simply no traffic to the page.</span>
       </div>
     </div>
   </div>
