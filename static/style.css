@@ -123,6 +123,17 @@ select:focus, input:focus { border-color: var(--accent); }
 .btn-secondary { background: var(--grey-bg); color: var(--text-primary); }
 .btn-secondary:hover { background: var(--border); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Inline "Clear" beside the back-in-stock OOS window inputs - a plain text
+   action, not a third pill competing with Refresh/Export. */
+.btn-link {
+  background: none;
+  color: var(--accent);
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: underline;
+}
+.btn-link:hover { color: var(--accent-hover); }
 
 .caveat-banner {
   background: var(--orange-bg);

@@ -74,11 +74,26 @@ stock* with two different numbers (`/api/back-in-stock`):
 | **OOS Span** | Calendar days from the first to the last out-of-stock hit, inclusive. Always ≥ Days OOS; the outer bracket of the outage. |
 | **Back In Stock** | Days since the last out-of-stock hit. Shown with a `~` — it's accurate to a day or two at best, given daily buckets plus GA4's own lag. |
 
-Both duration figures are counted across **all synced data, not the date
-range** — a finished outage can sit entirely outside the toolbar's window,
-so the date inputs are hidden on this tab rather than silently ignored.
-Category / partner / source / search still apply, and "Export to Excel"
-exports whichever tab is open.
+Both duration figures are counted across **all synced data, not the active
+report's date range** — a finished outage can sit entirely outside the
+toolbar's window, so that control is hidden on this tab rather than silently
+ignored. Category / partner / source / search still apply, and "Export to
+Excel" exports whichever tab is open.
+
+### The OOS window (this tab's own date range)
+
+The tab has its own date pair, **OOS window (first → last)**
+(`?oos_start=&oos_end=`), which filters on the outage itself rather than on
+which hits get counted: a product is listed only if **both** its first and
+its last out-of-stock hit fall inside those dates — "outages that happened
+entirely in the first half of September". Leave it blank (or hit *Clear*)
+for all synced dates.
+
+It is containment, not overlap, on purpose. An outage straddling an edge is
+left out rather than trimmed, because the Days OOS / OOS Span figures are
+still totalled over all dates — clipping would print a duration that reaches
+outside the window the user picked and reads as a bug. The tab badge and the
+CSV export apply the same window, so the three never disagree.
 
 Caveat worth repeating: if nobody refreshes from GA4 for a few days,
 *everything* looks recovered because the data stopped, not because stock

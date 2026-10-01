@@ -32,6 +32,19 @@
           <input type="date" id="endDate">
         </div>
       </div>
+      <!-- Back-in-stock tab only: filters on the outage window itself
+           (first → last OOS date must both fall inside these dates), not on
+           which hits get counted — hence a separate control from the active
+           report's date range. -->
+      <div class="filter-group" id="oosWindowFilterGroup" hidden>
+        <label title="Shows only outages that started and ended inside these dates">OOS window (first → last)</label>
+        <div class="date-inputs">
+          <input type="date" id="oosStartDate">
+          <span>to</span>
+          <input type="date" id="oosEndDate">
+          <button class="btn btn-link" id="oosWindowClear" type="button" title="Show outages from all synced dates">Clear</button>
+        </div>
+      </div>
       <div class="filter-group">
         <label>Category</label>
         <select id="categoryFilter"><option value="">All categories</option></select>

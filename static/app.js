@@ -27,8 +27,12 @@ const VIEWS = {
     cols: 9,
     // The back-in-stock figures are counted across all synced data, not the
     // toolbar range (a finished outage can sit entirely outside it), so the
-    // date inputs are hidden on this tab rather than silently ignored.
+    // active report's date inputs are hidden on this tab rather than silently
+    // ignored. This tab gets its own window instead (oos_start/oos_end),
+    // which filters on the outage itself: both the first and last OOS date
+    // must fall inside it.
     usesDateRange: false,
+    usesOosWindow: true,
   },
 };
 
@@ -94,7 +98,12 @@ function renderRecencyNote(r) {
     const stale = r.data_stale
       ? ` ⚠️ Latest synced data is ${r.latest_data_date}, older than the cutoff — so every product looks recovered because the data stopped, not because stock came back. Click “Refresh Data”.`
       : '';
-    note.innerHTML = `✅ <strong>Products that stopped going out of stock</strong> — no out-of-stock hit since <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}), so they're presumed back in stock. <strong>Days OOS</strong> counts days that fired at least one event and <strong>OOS Span</strong> is the first→last calendar gap, both across all synced data (not the date range above) — a GA4-visit proxy, not an inventory feed.${stale}`;
+    // Spell out that the window is containment (whole outage inside it), so
+    // nobody reads a narrow window as "clipped to these dates".
+    const window = (r.oos_start || r.oos_end)
+      ? ` <strong>OOS window:</strong> only outages that both started and ended between <strong>${r.oos_start || 'the earliest synced date'}</strong> and <strong>${r.oos_end || 'the latest synced date'}</strong> — an outage that straddles either edge is left out rather than trimmed, so the durations shown always match the dates shown.`
+      : '';
+    note.innerHTML = `✅ <strong>Products that stopped going out of stock</strong> — no out-of-stock hit since <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}), so they're presumed back in stock. <strong>Days OOS</strong> counts days that fired at least one event and <strong>OOS Span</strong> is the first→last calendar gap, both across all synced data — a GA4-visit proxy, not an inventory feed.${window}${stale}`;
     return;
   }
 
@@ -112,6 +121,10 @@ function buildFilterParams(view = state.view) {
   if (VIEWS[view].usesDateRange) {
     if (el('startDate').value) params.set('start', el('startDate').value);
     if (el('endDate').value) params.set('end', el('endDate').value);
+  }
+  if (VIEWS[view].usesOosWindow) {
+    if (el('oosStartDate').value) params.set('oos_start', el('oosStartDate').value);
+    if (el('oosEndDate').value) params.set('oos_end', el('oosEndDate').value);
   }
   if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
   if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
@@ -162,6 +175,10 @@ async function loadOtherTabCount() {
     if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
     if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
     if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
+    // Sent regardless of which tab is open: the server only applies the OOS
+    // window to the recovered count, so the badge matches that tab's rows.
+    if (el('oosStartDate').value) params.set('oos_start', el('oosStartDate').value);
+    if (el('oosEndDate').value) params.set('oos_end', el('oosEndDate').value);
     params.set('need', other);  // skip the half this page already knows exactly
     const counts = await fetch(`/api/tab-counts?${params.toString()}`).then(r => r.json());
     state[other].total = counts[other] || 0;
@@ -191,6 +208,10 @@ function renderPagination() {
 function emptyMessage() {
   const m = vs().meta;
   if (state.view === 'recovered') {
+    const hasWindow = !!(el('oosStartDate').value || el('oosEndDate').value);
+    if (hasWindow) {
+      return `No recovered products had their whole out-of-stock period inside ${el('oosStartDate').value || 'the earliest synced date'} → ${el('oosEndDate').value || 'the latest synced date'}. Widen the OOS window or clear it.`;
+    }
     return m
       ? `No products have gone quiet. Everything tracked still fired an out-of-stock hit on or after ${m.cutoff}.`
       : 'No recovered products match these filters.';
@@ -291,8 +312,11 @@ function switchView(view) {
     el(c.tab).classList.toggle('active', isCurrent);
     el(c.tab).setAttribute('aria-selected', String(isCurrent));
   });
-  // Date range only means something on the active report (see VIEWS above).
+  // Each tab shows only the date control that means something on it (see
+  // VIEWS above): the hit-counting range on the active report, the outage
+  // window on back-in-stock.
   el('dateFilterGroup').hidden = !cfg().usesDateRange;
+  el('oosWindowFilterGroup').hidden = !cfg().usesOosWindow;
   renderSortIndicators();
   loadProducts(false);
 }
@@ -419,8 +443,18 @@ el('trendModal').addEventListener('click', (e) => {
 
 // Filters auto-apply: every select fires immediately on change, the search
 // box debounces so it doesn't re-query on every keystroke.
-['startDate', 'endDate', 'categoryFilter', 'partnerFilter', 'sourceFilter'].forEach(id => {
+['startDate', 'endDate', 'oosStartDate', 'oosEndDate',
+ 'categoryFilter', 'partnerFilter', 'sourceFilter'].forEach(id => {
   el(id).addEventListener('change', () => loadProducts());
+});
+
+// Date inputs can't be emptied from the keyboard in every browser, so the
+// back-in-stock window needs an explicit way back to "all synced dates".
+el('oosWindowClear').addEventListener('click', () => {
+  if (!el('oosStartDate').value && !el('oosEndDate').value) return;
+  el('oosStartDate').value = '';
+  el('oosEndDate').value = '';
+  loadProducts();
 });
 
 let searchDebounce;

@@ -62,6 +62,17 @@ they are not interchangeable:
                     to the product doesn't count even if it was unavailable.
   - oos_span_days - calendar days from first to last OOS hit, inclusive.
                     Always >= days_oos; the outer bracket of the outage.
+That tab has its own date range (oos_start/oos_end), separate from the
+active report's: it filters on the *outage window* rather than on which hits
+get counted. A product is listed only if its whole first->last OOS span
+falls inside the selected dates (first_oos_date >= oos_start AND
+last_oos_date <= oos_end) - "show me outages that happened entirely in
+September". Containment, not overlap, is deliberate: an outage half outside
+the window would report days_oos/oos_span_days figures that reach outside it
+and read as wrong. The figures themselves are still aggregated over ALL
+dates in the DB; the window only decides which products qualify, so a listed
+product's duration numbers never disagree with its displayed dates.
+
 days_since_last_oos ("back in stock for ~N days") is counted from today, so
 it inherits the same caveat as the gate itself: if nobody has refreshed from
 GA4 in a while, a product looks recovered simply because the data stopped.
@@ -644,9 +655,35 @@ def _days_between(earlier: str | None, later: str | None) -> int | None:
     return (b - a).days
 
 
+def validate_window(start: str | None, end: str | None) -> tuple[str | None, str | None]:
+    """Sanity-check the back-in-stock tab's outage window.
+
+    Blank strings from an emptied date input mean "no bound", not a bad date.
+    A non-date string would otherwise compare as a plain string against the
+    YYYY-MM-DD dates in SQLite and silently return the wrong set, so it's a
+    400 instead.
+    """
+    from datetime import date
+    out: list[str | None] = []
+    for v in (start, end):
+        v = (v or "").strip()
+        if not v:
+            out.append(None)
+            continue
+        try:
+            date.fromisoformat(v)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"oos window dates must be YYYY-MM-DD (got {v!r})")
+        out.append(v)
+    if out[0] and out[1] and out[0] > out[1]:
+        raise HTTPException(status_code=400, detail=f"oos window start ({out[0]}) is after end ({out[1]})")
+    return out[0], out[1]
+
+
 def fetch_recovered_products(
     category: str | None, partner: str | None, source: str | None, q: str | None,
     sort: str, dir: str,
+    oos_start: str | None = None, oos_end: str | None = None,
 ) -> tuple[list[dict], dict]:
     """The inverse of fetch_filtered_products(): product codes the recency
     gate excludes, i.e. no out_of_stock_view since the cutoff, which in
@@ -660,6 +697,14 @@ def fetch_recovered_products(
     that actually fired events) and oos_span_days (first->last calendar
     span) - because they differ whenever the product had a quiet day, and
     only the span brackets the real outage.
+
+    oos_start/oos_end are this tab's own date range and work differently from
+    the active report's: they select products whose entire outage window sits
+    inside those dates (first_oos_date >= oos_start, last_oos_date <=
+    oos_end), applied as a HAVING over the same rollup. Rows are still summed
+    across all dates, so the durations shown always match the first/last
+    dates shown - see the module docstring for why containment rather than
+    overlap.
     """
     con = db()
     query = """SELECT product_code, MAX(product_name) product_name,
@@ -684,6 +729,20 @@ def fetch_recovered_products(
         query += " AND (product_code LIKE ? OR product_name LIKE ?)"
         params.extend([f"%{q}%", f"%{q}%"])
     query += " GROUP BY product_code"
+
+    # Outage window, as a HAVING on the same rollup: the first and last OOS
+    # dates are aggregates, so this can't be a WHERE. NULL (a product with
+    # only zero-view rows) fails the comparison, which is the same product the
+    # `if not r["days_oos"]` guard below drops anyway.
+    having: list[str] = []
+    if oos_start:
+        having.append("MIN(CASE WHEN oos_views > 0 THEN date END) >= ?")
+        params.append(oos_start)
+    if oos_end:
+        having.append("MAX(CASE WHEN oos_views > 0 THEN date END) <= ?")
+        params.append(oos_end)
+    if having:
+        query += " HAVING " + " AND ".join(having)
 
     rows = con.execute(query, params).fetchall()
 
@@ -722,6 +781,10 @@ def fetch_recovered_products(
         "cutoff": cutoff,
         "recovered": len(items),
         "latest_data_date": latest_data_date,
+        # Echoed back so the UI can say which outage window it's showing
+        # (and that it's containment, not overlap).
+        "oos_start": oos_start,
+        "oos_end": oos_end,
         # Same trap as the main report, pointed the other way: if the DB
         # hasn't been refreshed past the cutoff, EVERY product looks
         # recovered because the data stops, not because stock came back.
@@ -764,6 +827,8 @@ async def api_tab_counts(
     partner: str | None = None,
     source: str | None = None,
     q: str | None = None,
+    oos_start: str | None = None,
+    oos_end: str | None = None,
     need: str = Query("both", pattern="^(both|active|recovered)$"),
 ):
     """How many products sit on each tab under the current filters, for the
@@ -778,8 +843,11 @@ async def api_tab_counts(
 
     `start`/`end` scope the active count only - matching the active tab,
     which honours the date range. The recovered count ignores them, matching
-    the back-in-stock tab, which measures outages across all synced data.
+    the back-in-stock tab, which measures outages across all synced data; it
+    honours `oos_start`/`oos_end` (that tab's own outage window) instead, so
+    the badge never disagrees with the row count on the tab itself.
     """
+    oos_start, oos_end = validate_window(oos_start, oos_end)
     con = db()
 
     def filter_sql() -> tuple[str, list]:
@@ -821,10 +889,26 @@ async def api_tab_counts(
 
     if need in ("both", "recovered"):
         # Back-in-stock tab: codes ever out of stock that no longer pass the gate.
-        ever = {r["product_code"] for r in con.execute(
-            "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup"
-            " WHERE oos_views > 0" + shared_sql, shared_params).fetchall()}
+        # With an outage window set we need each code's first/last OOS date, so
+        # the DISTINCT becomes a GROUP BY + HAVING - same index, same shape as
+        # the tab's own query, just without materialising the rows.
+        rec_sql = ("SELECT product_code FROM oos_daily INDEXED BY idx_oos_rollup"
+                   " WHERE oos_views > 0" + shared_sql)
+        rec_params = list(shared_params)
+        if oos_start or oos_end:
+            rec_sql += " GROUP BY product_code HAVING 1=1"
+            if oos_start:
+                rec_sql += " AND MIN(date) >= ?"
+                rec_params.append(oos_start)
+            if oos_end:
+                rec_sql += " AND MAX(date) <= ?"
+                rec_params.append(oos_end)
+        else:
+            rec_sql = rec_sql.replace("SELECT product_code", "SELECT DISTINCT product_code", 1)
+        ever = {r["product_code"] for r in con.execute(rec_sql, rec_params).fetchall()}
         out["recovered"] = len(ever - active)
+        out["oos_start"] = oos_start
+        out["oos_end"] = oos_end
 
     con.close()
     return out
@@ -836,6 +920,8 @@ async def api_back_in_stock(
     partner: str | None = None,
     source: str | None = None,
     q: str | None = None,
+    oos_start: str | None = Query(None, description="Outage window start, YYYY-MM-DD"),
+    oos_end: str | None = Query(None, description="Outage window end, YYYY-MM-DD"),
     sort: str = Query("days_oos", pattern="^(" + "|".join(RECOVERED_SORT_KEYS) + ")$"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(200, ge=1, le=2000),
@@ -843,8 +929,13 @@ async def api_back_in_stock(
 ):
     """Products the recency gate removed from the main report - they stopped
     firing out_of_stock_view, so they're presumed back in stock - with how
-    long each was out of stock while it lasted."""
-    items, meta = fetch_recovered_products(category, partner, source, q, sort, dir)
+    long each was out of stock while it lasted.
+
+    oos_start/oos_end narrow this to outages that fall entirely within those
+    dates (first OOS hit on/after oos_start, last on/before oos_end)."""
+    oos_start, oos_end = validate_window(oos_start, oos_end)
+    items, meta = fetch_recovered_products(category, partner, source, q, sort, dir,
+                                          oos_start=oos_start, oos_end=oos_end)
     total = len(items)
     page = items[offset:offset + limit]
     return {
@@ -861,6 +952,8 @@ async def api_export(
     partner: str | None = None,
     source: str | None = None,
     q: str | None = None,
+    oos_start: str | None = None,
+    oos_end: str | None = None,
     sort: str = Query("oos_views"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
     view: str = Query("active", pattern="^(active|back_in_stock)$"),
@@ -877,9 +970,13 @@ async def api_export(
     if view == "back_in_stock":
         if sort not in RECOVERED_SORT_KEYS:
             sort = "days_oos"
-        # No date range: a recovered product's outage is measured across all
-        # synced data, matching the tab (see module docstring).
-        items, _ = fetch_recovered_products(category, partner, source, q, sort, dir)
+        # Not the active tab's date range: a recovered product's outage is
+        # measured across all synced data (see module docstring). This tab's
+        # own oos_start/oos_end outage window does apply, so the CSV matches
+        # the filtered rows on screen.
+        oos_start, oos_end = validate_window(oos_start, oos_end)
+        items, _ = fetch_recovered_products(category, partner, source, q, sort, dir,
+                                            oos_start=oos_start, oos_end=oos_end)
         writer.writerow([
             "Product Code", "Product Name", "Partner Code", "Category", "Source",
             "Days OOS (days with events)", "OOS Span (calendar days)", "OOS Views",
