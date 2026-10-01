@@ -81,6 +81,10 @@ header code { background: var(--grey-bg); padding: 2px 6px; border-radius: 6px; 
 }
 
 .filter-group { display: flex; flex-direction: column; gap: 6px; }
+/* `display: flex` above outranks the UA stylesheet's [hidden] rule, so the
+   date range group needs this to actually disappear on the back-in-stock
+   tab (where the range doesn't apply). */
+.filter-group[hidden] { display: none; }
 .filter-group.grow { flex: 1; min-width: 200px; }
 .filter-group label { font-size: 12px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.03em; }
 
@@ -134,6 +138,36 @@ select:focus, input:focus { border-color: var(--accent); }
 
 .status-bar { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; padding: 0 4px; }
 
+/* ─── View tabs (still OOS / back in stock) ──── */
+.tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  border-radius: 980px;
+  border: 1px solid var(--border);
+  background: var(--white);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.tab:hover { border-color: var(--accent); color: var(--accent); }
+.tab.active { background: var(--accent); border-color: var(--accent); color: var(--white); }
+.tab-count {
+  min-width: 22px;
+  padding: 1px 8px;
+  border-radius: 980px;
+  background: var(--grey-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.tab.active .tab-count { background: rgba(255,255,255,0.22); color: var(--white); }
+
 /* Recency gate explainer - why an in-range product may not be listed. */
 .recency-note {
   background: var(--accent-bg);
@@ -149,6 +183,12 @@ select:focus, input:focus { border-color: var(--accent); }
   background: var(--red-bg);
   border-color: #f7c9c5;
   color: #a3352d;
+}
+/* Back-in-stock tab explainer - same box, "resolved" colour. */
+.recency-note.recency-recovered {
+  background: var(--green-bg);
+  border-color: rgba(48,209,88,0.3);
+  color: #1a7f37;
 }
 
 .pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 18px; font-size: 13px; color: var(--text-secondary); }
@@ -187,15 +227,47 @@ tbody tr { cursor: pointer; transition: background var(--transition); }
 tbody tr:hover { background: var(--accent-bg); }
 tbody tr:last-child td { border-bottom: none; }
 
-/* Fixed layout needs explicit widths per column, in table order:
-   Product Code, Product Name, Partner, Category, OOS Views, Days OOS, First/Last OOS */
-th:nth-child(1), td:nth-child(1) { width: 240px; }
-th:nth-child(2), td:nth-child(2) { width: 320px; white-space: normal; }
-th:nth-child(3), td:nth-child(3) { width: 110px; }
-th:nth-child(4), td:nth-child(4) { width: 110px; }
-th:nth-child(5), td:nth-child(5) { width: 100px; }
-th:nth-child(6), td:nth-child(6) { width: 90px; }
-th:nth-child(7), td:nth-child(7) { width: 190px; }
+/* Fixed layout needs explicit widths per column, in table order. Scoped per
+   table since the two tabs have different column sets.
+   #productsTable: Product Code, Product Name, Partner, Category, OOS Views,
+   Days OOS, First/Last OOS */
+#productsTable th:nth-child(1), #productsTable td:nth-child(1) { width: 240px; }
+#productsTable th:nth-child(2), #productsTable td:nth-child(2) { width: 320px; white-space: normal; }
+#productsTable th:nth-child(3), #productsTable td:nth-child(3) { width: 110px; }
+#productsTable th:nth-child(4), #productsTable td:nth-child(4) { width: 110px; }
+#productsTable th:nth-child(5), #productsTable td:nth-child(5) { width: 100px; }
+#productsTable th:nth-child(6), #productsTable td:nth-child(6) { width: 90px; }
+#productsTable th:nth-child(7), #productsTable td:nth-child(7) { width: 190px; }
+
+/* #recoveredTable: Product Code, Product Name, Partner, Category, Days OOS,
+   OOS Span, OOS Views, First/Last OOS, Back In Stock */
+/* Nine columns, so they're tighter than the active table's seven - the sum
+   stays under ~1200px to fit a 1280px screen without a horizontal scroll. */
+#recoveredTable { min-width: 1150px; }
+#recoveredTable th:nth-child(1), #recoveredTable td:nth-child(1) { width: 200px; }
+#recoveredTable th:nth-child(2), #recoveredTable td:nth-child(2) { width: 202px; white-space: normal; }
+#recoveredTable th:nth-child(3), #recoveredTable td:nth-child(3) { width: 95px; }
+#recoveredTable th:nth-child(4), #recoveredTable td:nth-child(4) { width: 118px; }
+#recoveredTable th:nth-child(5), #recoveredTable td:nth-child(5) { width: 85px; }
+#recoveredTable th:nth-child(6), #recoveredTable td:nth-child(6) { width: 85px; }
+#recoveredTable th:nth-child(7), #recoveredTable td:nth-child(7) { width: 95px; }
+#recoveredTable th:nth-child(8), #recoveredTable td:nth-child(8) { width: 200px; }
+#recoveredTable th:nth-child(9), #recoveredTable td:nth-child(9) { width: 115px; }
+
+/* Days-OOS emphasis on the back-in-stock tab: it's the headline number there. */
+.days-oos-strong { font-weight: 700; color: var(--accent); }
+.recovered-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 980px;
+  background: var(--green-bg);
+  border: 1px solid rgba(48,209,88,0.25);
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a7f37;
+  font-variant-numeric: tabular-nums;
+}
+.muted-note { color: var(--text-tertiary); font-size: 12px; }
 
 .empty-state { text-align: center; padding: 60px 20px !important; color: var(--text-tertiary); cursor: default; }
 

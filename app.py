@@ -40,14 +40,33 @@ the selected window where the product had at least one out_of_stock_view
 event. GA4 has no direct inventory feed, so a day with zero site traffic to
 an OOS product isn't counted even if it was still unavailable that day.
 
-Recency gate: the report only ever lists products that are *still* going out
-of stock. A product code needs at least one out_of_stock_view dated within
-the last RECENCY_GATE_DAYS (default 2) calendar days, counted back from
-TODAY (server local date) - NOT from the end of the selected date range. The
-date range still governs which hits are counted/aggregated; the gate only
-decides which product codes survive into the report at all. See
+Recency gate: the main report only ever lists products that are *still*
+going out of stock. A product code needs at least one out_of_stock_view
+dated within the last RECENCY_GATE_DAYS (default 2) calendar days, counted
+back from TODAY (server local date) - NOT from the end of the selected date
+range. The date range still governs which hits are counted/aggregated; the
+gate only decides which product codes survive into the report at all. See
 recency_cutoff_date() / fetch_filtered_products() for the implementation and
 the GA4-lag caveat.
+
+Back-in-stock view (the second dashboard tab, /api/back-in-stock): the
+product codes the recency gate *drops* - i.e. they stopped firing
+out_of_stock_view, which in practice means they came back in stock. Its
+headline figure is how long each one was out of stock, and because a
+recovered product by definition has nothing recent to show, that is counted
+across ALL dates held in the DB rather than the toolbar's date range (which
+is therefore hidden on that tab). Two different numbers are reported and
+they are not interchangeable:
+  - days_oos      - days with at least one out_of_stock_view event. Same
+                    GA4-visit proxy caveat as above: a day with no traffic
+                    to the product doesn't count even if it was unavailable.
+  - oos_span_days - calendar days from first to last OOS hit, inclusive.
+                    Always >= days_oos; the outer bracket of the outage.
+days_since_last_oos ("back in stock for ~N days") is counted from today, so
+it inherits the same caveat as the gate itself: if nobody has refreshed from
+GA4 in a while, a product looks recovered simply because the data stopped.
+The meta block returns data_stale for exactly that case and the UI warns on
+it - don't read this tab as an inventory feed.
 """
 from __future__ import annotations
 
@@ -440,6 +459,14 @@ SORT_KEYS = {
     "last_oos_date": lambda i: (i["last_oos_date"] or ""),
 }
 
+# Back-in-stock tab carries two extra sortable columns the active report has
+# no equivalent for (the span of the outage, and how long it's been over).
+RECOVERED_SORT_KEYS = {
+    **SORT_KEYS,
+    "oos_span_days": lambda i: i["oos_span_days"],
+    "days_since_last_oos": lambda i: (i["days_since_last_oos"] if i["days_since_last_oos"] is not None else -1),
+}
+
 
 def recency_cutoff_date(days: int = RECENCY_GATE_DAYS) -> str:
     """Earliest date that still counts as "recent", anchored to TODAY.
@@ -547,6 +574,107 @@ def fetch_filtered_products(
     return items, recency
 
 
+def _days_between(earlier: str | None, later: str | None) -> int | None:
+    """Inclusive calendar-day difference between two YYYY-MM-DD strings."""
+    if not earlier or not later:
+        return None
+    from datetime import date
+    try:
+        a = date.fromisoformat(earlier)
+        b = date.fromisoformat(later)
+    except ValueError:
+        return None
+    return (b - a).days
+
+
+def fetch_recovered_products(
+    category: str | None, partner: str | None, source: str | None, q: str | None,
+    sort: str, dir: str,
+) -> tuple[list[dict], dict]:
+    """The inverse of fetch_filtered_products(): product codes the recency
+    gate excludes, i.e. no out_of_stock_view since the cutoff, which in
+    practice means they're back in stock.
+
+    Deliberately ignores the toolbar's date range and aggregates over every
+    date in the DB. A recovered product's whole point is the outage that
+    already ended, so clipping it to the last 30 days would under-report
+    days_oos (and would hide any product whose outage ended before the
+    window entirely). Both duration figures are returned - days_oos (days
+    that actually fired events) and oos_span_days (first->last calendar
+    span) - because they differ whenever the product had a quiet day, and
+    only the span brackets the real outage.
+    """
+    con = db()
+    query = """SELECT product_code, MAX(product_name) product_name,
+                      MAX(partner_code) partner_code, MAX(category) category,
+                      MAX(source_type) source_type,
+                      SUM(oos_views) oos_views,
+                      SUM(CASE WHEN oos_views > 0 THEN 1 ELSE 0 END) days_oos,
+                      MIN(CASE WHEN oos_views > 0 THEN date END) first_oos_date,
+                      MAX(CASE WHEN oos_views > 0 THEN date END) last_oos_date
+               FROM oos_daily WHERE 1=1"""
+    params: list = []
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+    if partner:
+        query += " AND partner_code = ?"
+        params.append(partner)
+    if source:
+        query += " AND source_type = ?"
+        params.append(source)
+    if q:
+        query += " AND (product_code LIKE ? OR product_name LIKE ?)"
+        params.extend([f"%{q}%", f"%{q}%"])
+    query += " GROUP BY product_code"
+
+    rows = con.execute(query, params).fetchall()
+
+    cutoff = recency_cutoff_date()
+    active = active_product_codes(con, cutoff)
+    latest_data_date = con.execute("SELECT MAX(date) d FROM oos_daily").fetchone()["d"]
+    con.close()
+
+    from datetime import date
+    today = date.today().isoformat()
+
+    items = []
+    for r in rows:
+        if r["product_code"] in active:
+            continue  # still going out of stock - belongs on the main report
+        if not r["days_oos"]:
+            continue  # only ever recorded zero-view rows; nothing to report
+        span = _days_between(r["first_oos_date"], r["last_oos_date"])
+        items.append({
+            "product_code": r["product_code"],
+            "product_name": r["product_name"],
+            "partner_code": r["partner_code"],
+            "category": r["category"],
+            "source_type": r["source_type"],
+            "oos_views": r["oos_views"],
+            "days_oos": r["days_oos"],
+            # Inclusive of both ends: a single-day outage spans 1 day, not 0.
+            "oos_span_days": (span + 1) if span is not None else r["days_oos"],
+            "first_oos_date": r["first_oos_date"],
+            "last_oos_date": r["last_oos_date"],
+            "days_since_last_oos": _days_between(r["last_oos_date"], today),
+        })
+
+    meta = {
+        "days": RECENCY_GATE_DAYS,
+        "cutoff": cutoff,
+        "recovered": len(items),
+        "latest_data_date": latest_data_date,
+        # Same trap as the main report, pointed the other way: if the DB
+        # hasn't been refreshed past the cutoff, EVERY product looks
+        # recovered because the data stops, not because stock came back.
+        "data_stale": bool(latest_data_date and latest_data_date < cutoff),
+    }
+
+    items.sort(key=RECOVERED_SORT_KEYS[sort], reverse=(dir == "desc"))
+    return items, meta
+
+
 @app.get("/api/products")
 async def api_products(
     start: str | None = None,
@@ -571,6 +699,29 @@ async def api_products(
     }
 
 
+@app.get("/api/back-in-stock")
+async def api_back_in_stock(
+    category: str | None = None,
+    partner: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    sort: str = Query("days_oos", pattern="^(" + "|".join(RECOVERED_SORT_KEYS) + ")$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
+    limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+):
+    """Products the recency gate removed from the main report - they stopped
+    firing out_of_stock_view, so they're presumed back in stock - with how
+    long each was out of stock while it lasted."""
+    items, meta = fetch_recovered_products(category, partner, source, q, sort, dir)
+    total = len(items)
+    page = items[offset:offset + limit]
+    return {
+        "count": total, "returned": len(page), "offset": offset, "limit": limit,
+        "items": page, "recency": meta,
+    }
+
+
 @app.get("/api/export")
 async def api_export(
     start: str | None = None,
@@ -579,33 +730,61 @@ async def api_export(
     partner: str | None = None,
     source: str | None = None,
     q: str | None = None,
-    sort: str = Query("oos_views", pattern="^(" + "|".join(SORT_KEYS) + ")$"),
+    sort: str = Query("oos_views"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
+    view: str = Query("active", pattern="^(active|back_in_stock)$"),
 ):
-    # Same call as /api/products, so the CSV is exactly the gated+filtered set
-    # the table shows; the recency meta itself is UI-only, hence discarded.
-    items, _ = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
-
+    """CSV of whichever tab the user is on: the active report (default) or the
+    back-in-stock list. Same fetch call as the matching API endpoint, so the
+    CSV is always exactly the filtered rows on screen."""
     import csv
     import io
     buf = io.StringIO()
     writer = csv.writer(buf)
-    # Column order mirrors the dashboard table exactly.
-    writer.writerow([
-        "Product Code", "Product Name", "Partner Code", "Category",
-        "Source", "OOS Views", "Days OOS", "First OOS Date", "Last OOS Date",
-    ])
     source_labels = {"partner_central": "Partner Central", "ecommerce": "Ecommerce"}
-    for i in items:
-        writer.writerow([
-            i["product_code"], i["product_name"] or "",
-            i["partner_code"] or "", i["category"] or "",
-            source_labels.get(i["source_type"], i["source_type"] or ""),
-            i["oos_views"], i["days_oos"],
-            i["first_oos_date"] or "", i["last_oos_date"] or "",
-        ])
 
-    filename = f"kapruka-out-of-stock-{time.strftime('%Y%m%d')}.csv"
+    if view == "back_in_stock":
+        if sort not in RECOVERED_SORT_KEYS:
+            sort = "days_oos"
+        # No date range: a recovered product's outage is measured across all
+        # synced data, matching the tab (see module docstring).
+        items, _ = fetch_recovered_products(category, partner, source, q, sort, dir)
+        writer.writerow([
+            "Product Code", "Product Name", "Partner Code", "Category", "Source",
+            "Days OOS (days with events)", "OOS Span (calendar days)", "OOS Views",
+            "First OOS Date", "Last OOS Date", "Back In Stock For (days)",
+        ])
+        for i in items:
+            writer.writerow([
+                i["product_code"], i["product_name"] or "",
+                i["partner_code"] or "", i["category"] or "",
+                source_labels.get(i["source_type"], i["source_type"] or ""),
+                i["days_oos"], i["oos_span_days"], i["oos_views"],
+                i["first_oos_date"] or "", i["last_oos_date"] or "",
+                i["days_since_last_oos"] if i["days_since_last_oos"] is not None else "",
+            ])
+        filename = f"kapruka-back-in-stock-{time.strftime('%Y%m%d')}.csv"
+    else:
+        if sort not in SORT_KEYS:
+            sort = "oos_views"
+        # Same call as /api/products, so the CSV is exactly the gated+filtered
+        # set the table shows; the recency meta itself is UI-only, hence dropped.
+        items, _ = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
+        # Column order mirrors the dashboard table exactly.
+        writer.writerow([
+            "Product Code", "Product Name", "Partner Code", "Category",
+            "Source", "OOS Views", "Days OOS", "First OOS Date", "Last OOS Date",
+        ])
+        for i in items:
+            writer.writerow([
+                i["product_code"], i["product_name"] or "",
+                i["partner_code"] or "", i["category"] or "",
+                source_labels.get(i["source_type"], i["source_type"] or ""),
+                i["oos_views"], i["days_oos"],
+                i["first_oos_date"] or "", i["last_oos_date"] or "",
+            ])
+        filename = f"kapruka-out-of-stock-{time.strftime('%Y%m%d')}.csv"
+
     return Response(
         content="﻿" + buf.getvalue(),  # BOM so Excel opens UTF-8 correctly
         media_type="text/csv",

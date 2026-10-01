@@ -1,7 +1,46 @@
 const PAGE_SIZE = 200;
-const state = { items: [], offset: 0, total: 0, sort: 'oos_views', dir: 'desc', recency: null };
+
+// Two tabs over the same table machinery. 'active' = products still firing
+// out_of_stock_view; 'recovered' = the ones the server's recency gate dropped,
+// i.e. presumed back in stock, with how long they were out of stock.
+// Each keeps its own sort/page so switching tabs doesn't reset the other.
+const VIEWS = {
+  active: {
+    endpoint: '/api/products',
+    exportView: 'active',
+    tableWrap: 'activeTableWrap',
+    body: 'productsBody',
+    table: 'productsTable',
+    tab: 'tabActive',
+    count: 'tabActiveCount',
+    cols: 7,
+    usesDateRange: true,
+  },
+  recovered: {
+    endpoint: '/api/back-in-stock',
+    exportView: 'back_in_stock',
+    tableWrap: 'recoveredTableWrap',
+    body: 'recoveredBody',
+    table: 'recoveredTable',
+    tab: 'tabRecovered',
+    count: 'tabRecoveredCount',
+    cols: 9,
+    // The back-in-stock figures are counted across all synced data, not the
+    // toolbar range (a finished outage can sit entirely outside it), so the
+    // date inputs are hidden on this tab rather than silently ignored.
+    usesDateRange: false,
+  },
+};
+
+const state = {
+  view: 'active',
+  active: { items: [], offset: 0, total: 0, sort: 'oos_views', dir: 'desc', meta: null },
+  recovered: { items: [], offset: 0, total: 0, sort: 'days_oos', dir: 'desc', meta: null },
+};
 
 const el = (id) => document.getElementById(id);
+const cfg = () => VIEWS[state.view];
+const vs = () => state[state.view];
 
 function defaultDates() {
   const end = new Date(); end.setDate(end.getDate() - 1);
@@ -34,22 +73,33 @@ async function loadStatus() {
   const s = await fetch('/api/status').then(r => r.json());
   const bar = el('statusBar');
   if (!s || !s.products) {
-    bar.textContent = 'No data yet — click "Refresh from GA4" to pull the latest out-of-stock events.';
+    bar.textContent = 'No data yet — click "Refresh Data" to pull the latest out-of-stock events.';
     return;
   }
   bar.textContent = `${s.products} products tracked (${s.active_products} active in the last ${s.recency_days} day${s.recency_days === 1 ? '' : 's'}) · data ${s.min_date} → ${s.max_date} · last refreshed ${s.last_updated || '—'}`;
 }
 
 // The recency gate is applied server-side to every view and to the export;
-// this just explains why a product the user expected to see isn't listed.
+// this explains why a product the user expected to see isn't listed (active
+// tab), or why it's listed as recovered (back-in-stock tab).
 function renderRecencyNote(r) {
   const note = el('recencyNote');
-  state.recency = r || null;
+  vs().meta = r || null;
   if (!r) { note.hidden = true; return; }
   note.hidden = false;
   note.classList.toggle('recency-stale', !!r.data_stale);
+  note.classList.toggle('recency-recovered', state.view === 'recovered' && !r.data_stale);
+
+  if (state.view === 'recovered') {
+    const stale = r.data_stale
+      ? ` ⚠️ Latest synced data is ${r.latest_data_date}, older than the cutoff — so every product looks recovered because the data stopped, not because stock came back. Click “Refresh Data”.`
+      : '';
+    note.innerHTML = `✅ <strong>Products that stopped going out of stock</strong> — no out-of-stock hit since <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}), so they're presumed back in stock. <strong>Days OOS</strong> counts days that fired at least one event and <strong>OOS Span</strong> is the first→last calendar gap, both across all synced data (not the date range above) — a GA4-visit proxy, not an inventory feed.${stale}`;
+    return;
+  }
+
   const hidden = r.hidden_stale
-    ? ` ${r.hidden_stale.toLocaleString()} product${r.hidden_stale === 1 ? '' : 's'} with hits inside the date range ${r.hidden_stale === 1 ? 'was' : 'were'} hidden as no longer active.`
+    ? ` ${r.hidden_stale.toLocaleString()} product${r.hidden_stale === 1 ? '' : 's'} with hits inside the date range ${r.hidden_stale === 1 ? 'was' : 'were'} hidden as no longer active — see the “Back in stock” tab.`
     : '';
   const stale = r.data_stale
     ? ` ⚠️ Latest synced data is ${r.latest_data_date}, older than the cutoff — click “Refresh Data” to pull the newest GA4 days.`
@@ -57,64 +107,110 @@ function renderRecencyNote(r) {
   note.innerHTML = `🕒 <strong>Showing only still-active products</strong> — at least one out-of-stock hit on or after <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}, counted back from today).${hidden}${stale}`;
 }
 
-function buildFilterParams() {
+function buildFilterParams(view = state.view) {
   const params = new URLSearchParams();
-  if (el('startDate').value) params.set('start', el('startDate').value);
-  if (el('endDate').value) params.set('end', el('endDate').value);
+  if (VIEWS[view].usesDateRange) {
+    if (el('startDate').value) params.set('start', el('startDate').value);
+    if (el('endDate').value) params.set('end', el('endDate').value);
+  }
   if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
   if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
   if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
   if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
-  params.set('sort', state.sort);
-  params.set('dir', state.dir);
+  params.set('sort', state[view].sort);
+  params.set('dir', state[view].dir);
   return params;
 }
 
 function buildQuery() {
   const params = buildFilterParams();
   params.set('limit', PAGE_SIZE);
-  params.set('offset', state.offset);
+  params.set('offset', vs().offset);
   return params.toString();
 }
 
 async function loadProducts(resetPage = true) {
-  if (resetPage) state.offset = 0;
-  const body = el('productsBody');
-  body.innerHTML = '<tr><td colspan="7" class="empty-state">Loading…</td></tr>';
-  const data = await fetch(`/api/products?${buildQuery()}`).then(r => r.json());
-  state.items = data.items || [];
-  state.total = data.count || 0;
+  const view = state.view;
+  if (resetPage) state[view].offset = 0;
+  const body = el(cfg().body);
+  body.innerHTML = `<tr><td colspan="${cfg().cols}" class="empty-state">Loading…</td></tr>`;
+  const data = await fetch(`${cfg().endpoint}?${buildQuery()}`).then(r => r.json());
+  state[view].items = data.items || [];
+  state[view].total = data.count || 0;
   renderRecencyNote(data.recency);
   renderTable();
   renderPagination();
+  renderTabCounts();
+  loadOtherTabCount();
+}
+
+function renderTabCounts() {
+  el(cfg().count).textContent = vs().total.toLocaleString();
+}
+
+// Keep the inactive tab's badge honest under the current filters without
+// rendering its whole table: one row is enough to read `count` off.
+async function loadOtherTabCount() {
+  const other = state.view === 'active' ? 'recovered' : 'active';
+  try {
+    const params = buildFilterParams(other);
+    params.set('limit', 1);
+    const data = await fetch(`${VIEWS[other].endpoint}?${params.toString()}`).then(r => r.json());
+    state[other].total = data.count || 0;
+    el(VIEWS[other].count).textContent = state[other].total.toLocaleString();
+  } catch (e) {
+    el(VIEWS[other].count).textContent = '—';
+  }
 }
 
 function renderPagination() {
   const el2 = el('pagination');
-  if (state.total === 0) { el2.innerHTML = ''; return; }
-  const start = state.offset + 1;
-  const end = Math.min(state.offset + PAGE_SIZE, state.total);
+  const v = vs();
+  if (v.total === 0) { el2.innerHTML = ''; return; }
+  const start = v.offset + 1;
+  const end = Math.min(v.offset + PAGE_SIZE, v.total);
   el2.innerHTML = `
-    <button class="btn btn-secondary" id="prevPage" ${state.offset === 0 ? 'disabled' : ''}>← Previous</button>
-    <span>${start}–${end} of ${state.total.toLocaleString()}</span>
-    <button class="btn btn-secondary" id="nextPage" ${end >= state.total ? 'disabled' : ''}>Next →</button>
+    <button class="btn btn-secondary" id="prevPage" ${v.offset === 0 ? 'disabled' : ''}>← Previous</button>
+    <span>${start}–${end} of ${v.total.toLocaleString()}</span>
+    <button class="btn btn-secondary" id="nextPage" ${end >= v.total ? 'disabled' : ''}>Next →</button>
   `;
   const prev = document.getElementById('prevPage');
   const next = document.getElementById('nextPage');
-  if (prev) prev.addEventListener('click', () => { state.offset = Math.max(0, state.offset - PAGE_SIZE); loadProducts(false); });
-  if (next) next.addEventListener('click', () => { state.offset += PAGE_SIZE; loadProducts(false); });
+  if (prev) prev.addEventListener('click', () => { vs().offset = Math.max(0, vs().offset - PAGE_SIZE); loadProducts(false); });
+  if (next) next.addEventListener('click', () => { vs().offset += PAGE_SIZE; loadProducts(false); });
+}
+
+function emptyMessage() {
+  const m = vs().meta;
+  if (state.view === 'recovered') {
+    return m
+      ? `No products have gone quiet. Everything tracked still fired an out-of-stock hit on or after ${m.cutoff}.`
+      : 'No recovered products match these filters.';
+  }
+  const gate = m
+    ? ` Products with no out-of-stock hits since ${m.cutoff} (last ${m.days} day${m.days === 1 ? '' : 's'}) are excluded — see the “Back in stock” tab.`
+    : '';
+  return `No products match these filters.${gate}`;
 }
 
 function renderTable() {
-  const body = el('productsBody');
-  if (state.items.length === 0) {
-    const gate = state.recency
-      ? ` Products with no out-of-stock hits since ${state.recency.cutoff} (last ${state.recency.days} day${state.recency.days === 1 ? '' : 's'}) are excluded.`
-      : '';
-    body.innerHTML = `<tr><td colspan="7" class="empty-state">No products match these filters.${escapeHtml(gate)}</td></tr>`;
+  const body = el(cfg().body);
+  const items = vs().items;
+  if (items.length === 0) {
+    body.innerHTML = `<tr><td colspan="${cfg().cols}" class="empty-state">${escapeHtml(emptyMessage())}</td></tr>`;
     return;
   }
-  body.innerHTML = state.items.map(item => `
+  body.innerHTML = state.view === 'recovered'
+    ? items.map(recoveredRow).join('')
+    : items.map(activeRow).join('');
+
+  body.querySelectorAll('tr[data-code]').forEach(row => {
+    row.addEventListener('click', () => openTrend(row.dataset.code));
+  });
+}
+
+function activeRow(item) {
+  return `
     <tr data-code="${escapeAttr(item.product_code)}">
       <td class="pc-code">${escapeHtml(item.product_code)}</td>
       <td>${escapeHtml(item.product_name || '—')}</td>
@@ -124,34 +220,77 @@ function renderTable() {
       <td class="num">${item.days_oos}</td>
       <td class="dates-cell">${item.first_oos_date || '—'} → ${item.last_oos_date || '—'}</td>
     </tr>
-  `).join('');
+  `;
+}
 
-  body.querySelectorAll('tr[data-code]').forEach(row => {
-    row.addEventListener('click', () => openTrend(row.dataset.code));
-  });
+function recoveredRow(item) {
+  const back = item.days_since_last_oos;
+  // "~" because the gate works off daily buckets with GA4's own reporting
+  // lag behind them, so this is accurate to a day or two at best.
+  const backLabel = back === null || back === undefined
+    ? '—'
+    : `<span class="recovered-badge">~${back}d</span>`;
+  return `
+    <tr data-code="${escapeAttr(item.product_code)}">
+      <td class="pc-code">${escapeHtml(item.product_code)}</td>
+      <td>${escapeHtml(item.product_name || '—')}</td>
+      <td>${item.partner_code ? `<span class="partner-badge">${escapeHtml(item.partner_code)}</span>` : '—'}</td>
+      <td>${item.category ? `<span class="category-badge">${escapeHtml(item.category)}</span>` : '—'}</td>
+      <td class="num days-oos-strong">${item.days_oos}</td>
+      <td class="num"><span class="muted-note">${item.oos_span_days}d</span></td>
+      <td class="num">${item.oos_views.toLocaleString()}</td>
+      <td class="dates-cell">${item.first_oos_date || '—'} → ${item.last_oos_date || '—'}</td>
+      <td class="num">${backLabel}</td>
+    </tr>
+  `;
 }
 
 function renderSortIndicators() {
-  document.querySelectorAll('th.sortable').forEach(th => {
+  const table = el(cfg().table);
+  table.querySelectorAll('th.sortable').forEach(th => {
     th.classList.remove('sort-asc', 'sort-desc');
-    if (th.dataset.sort === state.sort) {
-      th.classList.add(state.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+    if (th.dataset.sort === vs().sort) {
+      th.classList.add(vs().dir === 'asc' ? 'sort-asc' : 'sort-desc');
     }
   });
 }
 
-document.querySelectorAll('th.sortable').forEach(th => {
-  th.addEventListener('click', () => {
-    const key = th.dataset.sort;
-    if (state.sort === key) {
-      state.dir = state.dir === 'asc' ? 'desc' : 'asc';
-    } else {
-      state.sort = key;
-      state.dir = 'desc';
-    }
-    renderSortIndicators();
-    loadProducts();
+// Delegated so both tables' headers share one handler and sort the view
+// they belong to.
+['productsTable', 'recoveredTable'].forEach(tableId => {
+  el(tableId).querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      const v = vs();
+      if (v.sort === key) {
+        v.dir = v.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        v.sort = key;
+        v.dir = 'desc';
+      }
+      renderSortIndicators();
+      loadProducts();
+    });
   });
+});
+
+function switchView(view) {
+  if (!VIEWS[view] || view === state.view) return;
+  state.view = view;
+  Object.entries(VIEWS).forEach(([name, c]) => {
+    const isCurrent = name === view;
+    el(c.tableWrap).hidden = !isCurrent;
+    el(c.tab).classList.toggle('active', isCurrent);
+    el(c.tab).setAttribute('aria-selected', String(isCurrent));
+  });
+  // Date range only means something on the active report (see VIEWS above).
+  el('dateFilterGroup').hidden = !cfg().usesDateRange;
+  renderSortIndicators();
+  loadProducts(false);
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => switchView(tab.dataset.view));
 });
 
 function escapeHtml(s) {
@@ -302,8 +441,10 @@ el('refreshBtn').addEventListener('click', async () => {
   }
 });
 
+// Exports whichever tab is open, with that tab's filters and sort.
 el('exportBtn').addEventListener('click', () => {
   const params = buildFilterParams();
+  params.set('view', cfg().exportView);
   window.location.href = `/api/export?${params.toString()}`;
 });
 

@@ -24,7 +24,7 @@
 
   <div class="container">
     <div class="toolbar">
-      <div class="filter-group">
+      <div class="filter-group" id="dateFilterGroup">
         <label>Date range</label>
         <div class="date-inputs">
           <input type="date" id="startDate">
@@ -73,9 +73,20 @@
 
     <div class="status-bar" id="statusBar"></div>
 
+    <!-- Two views over the same data: products still firing out_of_stock_view,
+         and the ones the recency gate dropped (presumed back in stock). -->
+    <div class="tabs" role="tablist">
+      <button class="tab active" id="tabActive" data-view="active" role="tab" aria-selected="true">
+        🚫 Still out of stock <span class="tab-count" id="tabActiveCount"></span>
+      </button>
+      <button class="tab" id="tabRecovered" data-view="recovered" role="tab" aria-selected="false">
+        ✅ Back in stock <span class="tab-count" id="tabRecoveredCount"></span>
+      </button>
+    </div>
+
     <div class="recency-note" id="recencyNote" hidden></div>
 
-    <div class="table-wrap">
+    <div class="table-wrap" id="activeTableWrap">
       <table id="productsTable">
         <thead>
           <tr>
@@ -90,6 +101,27 @@
         </thead>
         <tbody id="productsBody">
           <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="table-wrap" id="recoveredTableWrap" hidden>
+      <table id="recoveredTable">
+        <thead>
+          <tr>
+            <th class="sortable" data-sort="product_code">Product Code</th>
+            <th class="sortable" data-sort="product_name">Product Name</th>
+            <th class="sortable" data-sort="partner_code">Partner</th>
+            <th class="sortable" data-sort="category">Category</th>
+            <th class="sortable" data-sort="days_oos" title="Days that fired at least one out_of_stock_view event">Days OOS</th>
+            <th class="sortable" data-sort="oos_span_days" title="Calendar days from first to last out-of-stock hit, inclusive">OOS Span</th>
+            <th class="sortable" data-sort="oos_views">OOS Views</th>
+            <th class="sortable" data-sort="last_oos_date">First / Last OOS</th>
+            <th class="sortable" data-sort="days_since_last_oos" title="Days since the last out-of-stock hit">Back In Stock</th>
+          </tr>
+        </thead>
+        <tbody id="recoveredBody">
+          <tr><td colspan="9" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
     </div>

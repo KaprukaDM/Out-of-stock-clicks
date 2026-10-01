@@ -45,6 +45,30 @@ one out_of_stock_view event — a GA4-visit proxy, not a direct inventory
 feed) and the first/last date the event was seen. Clicking a row opens a
 trend chart of daily OOS views vs. page views for that product.
 
+## Tabs: "Still out of stock" / "Back in stock"
+
+The products the recency gate removes don't just vanish — they move to the
+second tab. A product that stops firing `out_of_stock_view` has, in
+practice, come back in stock, and that tab answers *how long it was out of
+stock* with two different numbers (`/api/back-in-stock`):
+
+| Column | Means |
+|---|---|
+| **Days OOS** | Days that fired at least one `out_of_stock_view`. Same visit-proxy caveat as above: a day with no traffic to the product isn't counted even if it was genuinely unavailable. |
+| **OOS Span** | Calendar days from the first to the last out-of-stock hit, inclusive. Always ≥ Days OOS; the outer bracket of the outage. |
+| **Back In Stock** | Days since the last out-of-stock hit. Shown with a `~` — it's accurate to a day or two at best, given daily buckets plus GA4's own lag. |
+
+Both duration figures are counted across **all synced data, not the date
+range** — a finished outage can sit entirely outside the toolbar's window,
+so the date inputs are hidden on this tab rather than silently ignored.
+Category / partner / source / search still apply, and "Export to Excel"
+exports whichever tab is open.
+
+Caveat worth repeating: if nobody refreshes from GA4 for a few days,
+*everything* looks recovered because the data stopped, not because stock
+came back. The note above the table turns red and says exactly that when the
+newest synced date is older than the gate's cutoff.
+
 ## Custom dimensions (GA4 Admin > Custom Definitions)
 | Display name in GA4 UI | Event parameter | API name |
 |---|---|---|
