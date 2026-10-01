@@ -32,17 +32,17 @@
           <input type="date" id="endDate">
         </div>
       </div>
-      <!-- Back-in-stock tab only: filters on the outage window itself
-           (first → last OOS date must both fall inside these dates), not on
-           which hits get counted — hence a separate control from the active
-           report's date range. -->
+      <!-- Back-in-stock tab only. Separate from the active report's range
+           because its default is "all synced dates" (a finished outage can
+           sit entirely outside any recent window). When set, it scopes every
+           figure on that tab to those dates. -->
       <div class="filter-group" id="oosWindowFilterGroup" hidden>
-        <label title="Shows only outages that started and ended inside these dates">OOS window (first → last)</label>
+        <label title="Counts only out-of-stock days inside these dates">OOS date range</label>
         <div class="date-inputs">
           <input type="date" id="oosStartDate">
           <span>to</span>
           <input type="date" id="oosEndDate">
-          <button class="btn btn-link" id="oosWindowClear" type="button" title="Show outages from all synced dates">Clear</button>
+          <button class="btn btn-link" id="oosWindowClear" type="button" title="Count across all synced dates">Clear</button>
         </div>
       </div>
       <div class="filter-group">
@@ -126,8 +126,8 @@
             <th class="sortable" data-sort="product_name">Product Name</th>
             <th class="sortable" data-sort="partner_code">Partner</th>
             <th class="sortable" data-sort="category">Category</th>
-            <th class="sortable" data-sort="days_oos" title="Days that fired at least one out_of_stock_view event">Days OOS</th>
-            <th class="sortable" data-sort="oos_span_days" title="Calendar days from first to last out-of-stock hit, inclusive">OOS Span</th>
+            <th class="sortable" data-sort="days_oos" title="Days that fired at least one out_of_stock_view event, inside the selected OOS date range">Days OOS</th>
+            <th class="sortable" data-sort="oos_span_days" title="Calendar days from first to last out-of-stock hit in the selected range, inclusive">OOS Span</th>
             <th class="sortable" data-sort="oos_views">OOS Views</th>
             <th class="sortable" data-sort="last_oos_date">First / Last OOS</th>
             <th class="sortable" data-sort="days_since_last_oos" title="Days since the last out-of-stock hit">Back In Stock</th>

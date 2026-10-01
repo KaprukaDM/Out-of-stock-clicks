@@ -25,12 +25,11 @@ const VIEWS = {
     tab: 'tabRecovered',
     count: 'tabRecoveredCount',
     cols: 9,
-    // The back-in-stock figures are counted across all synced data, not the
-    // toolbar range (a finished outage can sit entirely outside it), so the
-    // active report's date inputs are hidden on this tab rather than silently
-    // ignored. This tab gets its own window instead (oos_start/oos_end),
-    // which filters on the outage itself: both the first and last OOS date
-    // must fall inside it.
+    // The back-in-stock figures default to all synced data, not the toolbar
+    // range (a finished outage can sit entirely outside it), so the active
+    // report's date inputs are hidden on this tab rather than silently
+    // ignored. This tab gets its own range instead (oos_start/oos_end): set
+    // it and every figure is counted inside those dates only.
     usesDateRange: false,
     usesOosWindow: true,
   },
@@ -98,12 +97,16 @@ function renderRecencyNote(r) {
     const stale = r.data_stale
       ? ` ⚠️ Latest synced data is ${r.latest_data_date}, older than the cutoff — so every product looks recovered because the data stopped, not because stock came back. Click “Refresh Data”.`
       : '';
-    // Spell out that the window is containment (whole outage inside it), so
-    // nobody reads a narrow window as "clipped to these dates".
-    const window = (r.oos_start || r.oos_end)
-      ? ` <strong>OOS window:</strong> only outages that both started and ended between <strong>${r.oos_start || 'the earliest synced date'}</strong> and <strong>${r.oos_end || 'the latest synced date'}</strong> — an outage that straddles either edge is left out rather than trimmed, so the durations shown always match the dates shown.`
+    // Say plainly which dates the figures cover — a set range means the
+    // numbers are counted inside it only, not across all synced data.
+    const ranged = !!(r.oos_start || r.oos_end);
+    const scope = ranged
+      ? `counted <strong>only between ${r.oos_start || 'the earliest synced date'} and ${r.oos_end || 'the latest synced date'}</strong> (an outage running past either edge is trimmed to these dates)`
+      : 'counted across <strong>all synced dates</strong>';
+    const backNote = ranged
+      ? ` <strong>Back In Stock</strong> is the exception — always measured from the product's real last out-of-stock hit, not the last one in the range.`
       : '';
-    note.innerHTML = `✅ <strong>Products that stopped going out of stock</strong> — no out-of-stock hit since <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}), so they're presumed back in stock. <strong>Days OOS</strong> counts days that fired at least one event and <strong>OOS Span</strong> is the first→last calendar gap, both across all synced data — a GA4-visit proxy, not an inventory feed.${window}${stale}`;
+    note.innerHTML = `✅ <strong>Products that stopped going out of stock</strong> — no out-of-stock hit since <strong>${r.cutoff}</strong> (last ${r.days} day${r.days === 1 ? '' : 's'}), so they're presumed back in stock. <strong>Days OOS</strong> (days that fired at least one event), <strong>OOS Span</strong> (first→last calendar gap) and <strong>OOS Views</strong> are ${scope} — a GA4-visit proxy, not an inventory feed.${backNote}${stale}`;
     return;
   }
 
@@ -210,7 +213,7 @@ function emptyMessage() {
   if (state.view === 'recovered') {
     const hasWindow = !!(el('oosStartDate').value || el('oosEndDate').value);
     if (hasWindow) {
-      return `No recovered products had their whole out-of-stock period inside ${el('oosStartDate').value || 'the earliest synced date'} → ${el('oosEndDate').value || 'the latest synced date'}. Widen the OOS window or clear it.`;
+      return `No recovered products had an out-of-stock day between ${el('oosStartDate').value || 'the earliest synced date'} and ${el('oosEndDate').value || 'the latest synced date'}. Widen the OOS date range or clear it.`;
     }
     return m
       ? `No products have gone quiet. Everything tracked still fired an out-of-stock hit on or after ${m.cutoff}.`
