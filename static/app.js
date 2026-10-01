@@ -148,15 +148,23 @@ function renderTabCounts() {
   el(cfg().count).textContent = vs().total.toLocaleString();
 }
 
-// Keep the inactive tab's badge honest under the current filters without
-// rendering its whole table: one row is enough to read `count` off.
+// Badge for the tab you're NOT on. Hitting that tab's real endpoint would
+// re-run its whole per-product rollup (seconds, on a real month of data)
+// just to read one number, so there's a dedicated count-only endpoint that
+// both badges come from instead.
 async function loadOtherTabCount() {
   const other = state.view === 'active' ? 'recovered' : 'active';
   try {
-    const params = buildFilterParams(other);
-    params.set('limit', 1);
-    const data = await fetch(`${VIEWS[other].endpoint}?${params.toString()}`).then(r => r.json());
-    state[other].total = data.count || 0;
+    const params = new URLSearchParams();
+    if (el('startDate').value) params.set('start', el('startDate').value);
+    if (el('endDate').value) params.set('end', el('endDate').value);
+    if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
+    if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
+    if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
+    if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
+    params.set('need', other);  // skip the half this page already knows exactly
+    const counts = await fetch(`/api/tab-counts?${params.toString()}`).then(r => r.json());
+    state[other].total = counts[other] || 0;
     el(VIEWS[other].count).textContent = state[other].total.toLocaleString();
   } catch (e) {
     el(VIEWS[other].count).textContent = '—';

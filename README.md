@@ -14,6 +14,22 @@ product page marked out of stock) straight from the GA4 Data API — no daily
 ingest script, refresh is on-demand from the dashboard's "Refresh from GA4"
 button (pulls the last 30 days).
 
+### Backfilling an explicit window
+
+The button always pulls "the last N days ending yesterday", which can't
+reach a month once it has scrolled out of range. `POST /api/refresh` takes
+an explicit window for that:
+
+```
+curl -X POST "http://localhost:8091/api/refresh?start=2026-09-01&end=2026-09-30"
+```
+
+Rows upsert on `(product_code, date)`, so re-pulling a window you already
+have overwrites those days rather than double-counting them. `end` is
+clamped to yesterday (GA4 has nothing for today yet). A bad or reversed
+date range returns 400 with the reason. A full month on this property is
+~490k rows and takes about 2¼ minutes.
+
 ## Filters
 - **Date range** — any window within the synced data
 - **Category** — derived from the Partner Central product code prefix
@@ -68,6 +84,42 @@ Caveat worth repeating: if nobody refreshes from GA4 for a few days,
 *everything* looks recovered because the data stopped, not because stock
 came back. The note above the table turns red and says exactly that when the
 newest synced date is older than the gate's cutoff.
+
+**The gate is tight, and the tab inherits that.** On real September data
+(27,847 products; 20,000 still out of stock, 7,847 back in stock), **39% of
+the back-in-stock list — 3,090 products — had their last out-of-stock hit on
+the second-to-last day**, i.e. they only missed the single final day. A
+product with no site traffic for one day is indistinguishable here from one
+that was restocked, so treat the short-gap end of this tab as "went quiet",
+not "confirmed restocked". Raising `RECENCY_GATE_DAYS` (e.g. to 3–4) trades
+some freshness on the main report for far fewer false recoveries.
+
+## Performance notes
+
+A real month is ~490k daily rows across ~28k products, and both tabs run a
+GROUP BY over it. `idx_oos_rollup` (`product_code, date, oos_views,
+category, partner_code, source_type, product_name`) is a covering index that
+lets SQLite group straight off the index instead of building a temp B-tree.
+Measured on September 2026 data:
+
+| | before | after |
+|---|---|---|
+| `/api/products` | 8.2s | 2.5s |
+| `/api/back-in-stock` | 5.6s | 2.3s |
+| tab badge counts | a second full rollup | 0.7s (`/api/tab-counts`) |
+
+Two things to leave alone unless you re-measure:
+- The rollup queries say `INDEXED BY idx_oos_rollup` explicitly. With a date
+  filter present the planner otherwise picks `idx_oos_date` and pays for the
+  temp B-tree, and which one it picks changes depending on whether `ANALYZE`
+  has ever been run on that copy of the DB.
+- `active_product_codes()` is pinned to `idx_oos_date` instead — the recency
+  cutoff is only ever a 2-day slice, so narrowing by date first wins there
+  (0.46s vs 0.76s).
+
+The index is roughly table-sized on disk (~182 MB total for September
+alone), and `init_db()` builds it at startup, which takes a few seconds the
+first time after deploying onto an existing `data.db`.
 
 ## Custom dimensions (GA4 Admin > Custom Definitions)
 | Display name in GA4 UI | Event parameter | API name |

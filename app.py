@@ -291,6 +291,17 @@ def init_db():
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_partner ON oos_daily(partner_code)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_category ON oos_daily(category)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_source ON oos_daily(source_type)")
+    # Covering index for the per-product rollup both tabs run. Leading
+    # product_code means SQLite can GROUP BY straight off the index instead of
+    # building a temp B-tree, and every column the rollup reads is in the
+    # index, so it never touches the table. On a real month of data (~490k
+    # rows / ~28k products) that took the rollup from 6.3s to 2.6s. It is
+    # roughly table-sized on disk, which is the trade. Queries must say
+    # INDEXED BY to get it - with a date filter present the planner otherwise
+    # prefers idx_oos_date and pays for the temp B-tree.
+    con.execute("""CREATE INDEX IF NOT EXISTS idx_oos_rollup
+                   ON oos_daily(product_code, date, oos_views, category,
+                                partner_code, source_type, product_name)""")
     con.commit()
     con.close()
 
@@ -338,17 +349,46 @@ async def fetch_oos_events(token: str, dims: dict, start_date: str, end_date: st
     return rows_out
 
 
-async def refresh_from_ga4(days: int = 30) -> dict:
+async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | None = None) -> dict:
+    """Pull out_of_stock_view rows from GA4 and upsert them into oos_daily.
+
+    Default (no start/end): the last `days` days ending yesterday - what the
+    dashboard's "Refresh Data" button does. Pass an explicit start/end
+    (YYYY-MM-DD) to backfill a specific past window instead, e.g. a whole
+    calendar month that has already ended; "last N days" can't address one
+    of those once it has scrolled out of range. Upserts by (product_code,
+    date), so re-pulling a window you already have is safe - it overwrites
+    those days rather than double-counting them.
+    """
     if not GA4_PROPERTY_ID or not GA4_REFRESH_TOKEN:
         raise RuntimeError("GA4 credentials not configured (set GA4_PROPERTY_ID, GA4_CLIENT_ID, GA4_CLIENT_SECRET, GA4_REFRESH_TOKEN)")
 
     token = await get_access_token()
     dims = await resolve_dimensions()
 
-    from datetime import datetime, timedelta
-    end = datetime.utcnow().date() - timedelta(days=1)
-    start = end - timedelta(days=days - 1)
-    start_s, end_s = start.isoformat(), end.isoformat()
+    from datetime import date, datetime, timedelta
+    yesterday = datetime.utcnow().date() - timedelta(days=1)
+
+    if start or end:
+        # Explicit backfill window. GA4 has nothing for today yet (its own
+        # ~1-day processing lag), so an end past yesterday is clamped rather
+        # than silently returning a short window.
+        try:
+            start_d = date.fromisoformat(start) if start else None
+            end_d = date.fromisoformat(end) if end else yesterday
+        except ValueError:
+            raise ValueError("start/end must be YYYY-MM-DD dates")
+        if end_d > yesterday:
+            end_d = yesterday
+        if start_d is None:
+            start_d = end_d - timedelta(days=days - 1)
+        if start_d > end_d:
+            raise ValueError(f"start ({start_d}) is after end ({end_d})")
+        start_s, end_s = start_d.isoformat(), end_d.isoformat()
+    else:
+        end_d = yesterday
+        start_d = end_d - timedelta(days=days - 1)
+        start_s, end_s = start_d.isoformat(), end_d.isoformat()
 
     oos_rows = await fetch_oos_events(token, dims, start_s, end_s)
 
@@ -399,10 +439,20 @@ async def refresh_from_ga4(days: int = 30) -> dict:
 
 # ------------------------------------------------------------------ API
 @app.post("/api/refresh")
-async def api_refresh(days: int = Query(30, ge=1, le=90)):
+async def api_refresh(
+    days: int = Query(30, ge=1, le=90),
+    start: str | None = Query(None, description="Backfill window start, YYYY-MM-DD"),
+    end: str | None = Query(None, description="Backfill window end, YYYY-MM-DD (clamped to yesterday)"),
+):
+    """Default pull is the last `days` days ending yesterday (the dashboard
+    button). Pass start/end to backfill an explicit past window, e.g.
+    ?start=2026-09-01&end=2026-09-30 for all of September - needed because
+    "last N days" can't reach a month once it has scrolled past."""
     try:
-        result = await refresh_from_ga4(days=days)
-        return result
+        return await refresh_from_ga4(days=days, start=start, end=end)
+    except ValueError as e:
+        # Bad start/end from the caller - a client error, not a server fault.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -484,9 +534,16 @@ def recency_cutoff_date(days: int = RECENCY_GATE_DAYS) -> str:
 
 
 def active_product_codes(con: sqlite3.Connection, cutoff: str) -> set[str]:
-    """Product codes with at least one out_of_stock_view on/after `cutoff`."""
+    """Product codes with at least one out_of_stock_view on/after `cutoff`.
+
+    Pinned to the date index on purpose: the cutoff is only ever a 2-day
+    slice, so narrowing by date first beats scanning the product-ordered
+    covering index (0.46s vs 0.76s on a real month). The hint also stops the
+    plan flip-flopping depending on whether ANALYZE has ever been run.
+    """
     rows = con.execute(
-        "SELECT DISTINCT product_code FROM oos_daily WHERE date >= ? AND oos_views > 0",
+        "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_date"
+        " WHERE date >= ? AND oos_views > 0",
         (cutoff,),
     ).fetchall()
     return {r["product_code"] for r in rows}
@@ -511,7 +568,7 @@ def fetch_filtered_products(
                       SUM(CASE WHEN oos_views > 0 THEN 1 ELSE 0 END) days_oos,
                       MIN(CASE WHEN oos_views > 0 THEN date END) first_oos_date,
                       MAX(CASE WHEN oos_views > 0 THEN date END) last_oos_date
-               FROM oos_daily WHERE 1=1"""
+               FROM oos_daily INDEXED BY idx_oos_rollup WHERE 1=1"""
     params: list = []
     if start:
         query += " AND date >= ?"
@@ -612,7 +669,7 @@ def fetch_recovered_products(
                       SUM(CASE WHEN oos_views > 0 THEN 1 ELSE 0 END) days_oos,
                       MIN(CASE WHEN oos_views > 0 THEN date END) first_oos_date,
                       MAX(CASE WHEN oos_views > 0 THEN date END) last_oos_date
-               FROM oos_daily WHERE 1=1"""
+               FROM oos_daily INDEXED BY idx_oos_rollup WHERE 1=1"""
     params: list = []
     if category:
         query += " AND category = ?"
@@ -697,6 +754,80 @@ async def api_products(
         "count": total, "returned": len(page), "offset": offset, "limit": limit,
         "items": page, "recency": recency,
     }
+
+
+@app.get("/api/tab-counts")
+async def api_tab_counts(
+    start: str | None = None,
+    end: str | None = None,
+    category: str | None = None,
+    partner: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    need: str = Query("both", pattern="^(both|active|recovered)$"),
+):
+    """How many products sit on each tab under the current filters, for the
+    tab badges.
+
+    Deliberately not "call the other tab's endpoint and read its count": that
+    re-runs the full per-product rollup (~2.4s on a real month) just to get
+    one number. These are DISTINCT-product_code queries the indexes satisfy
+    outright. `need` skips the half you already know - the tab you're on
+    reports its own exact total from its own response, so the UI only ever
+    asks for the other one (~1.3s instead of ~2.2s).
+
+    `start`/`end` scope the active count only - matching the active tab,
+    which honours the date range. The recovered count ignores them, matching
+    the back-in-stock tab, which measures outages across all synced data.
+    """
+    con = db()
+
+    def filter_sql() -> tuple[str, list]:
+        sql, params = "", []
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        if partner:
+            sql += " AND partner_code = ?"
+            params.append(partner)
+        if source:
+            sql += " AND source_type = ?"
+            params.append(source)
+        if q:
+            sql += " AND (product_code LIKE ? OR product_name LIKE ?)"
+            params.extend([f"%{q}%", f"%{q}%"])
+        return sql, params
+
+    shared_sql, shared_params = filter_sql()
+    cutoff = recency_cutoff_date()
+    active = active_product_codes(con, cutoff)
+
+    out: dict = {"cutoff": cutoff}
+
+    if need in ("both", "active"):
+        # Active tab: codes with a hit inside the date range that also pass the gate.
+        sql = "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup WHERE oos_views > 0"
+        params: list = []
+        if start:
+            sql += " AND date >= ?"
+            params.append(start)
+        if end:
+            sql += " AND date <= ?"
+            params.append(end)
+        sql += shared_sql
+        params += shared_params
+        in_range = {r["product_code"] for r in con.execute(sql, params).fetchall()}
+        out["active"] = len(in_range & active)
+
+    if need in ("both", "recovered"):
+        # Back-in-stock tab: codes ever out of stock that no longer pass the gate.
+        ever = {r["product_code"] for r in con.execute(
+            "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup"
+            " WHERE oos_views > 0" + shared_sql, shared_params).fetchall()}
+        out["recovered"] = len(ever - active)
+
+    con.close()
+    return out
 
 
 @app.get("/api/back-in-stock")
