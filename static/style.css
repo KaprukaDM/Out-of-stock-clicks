@@ -53,6 +53,17 @@ body {
   object-fit: cover;
 }
 .topbar .brand-name { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+/* Pushes Refresh (and its last-synced hint) to the top right of the bar. */
+.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.topbar-hint { font-size: 12px; color: rgba(255,255,255,0.65); font-variant-numeric: tabular-nums; }
+.btn-refresh {
+  background: var(--kapruka-gold);
+  color: #3a2800;
+  padding: 8px 16px;
+  font-size: 13px;
+}
+.btn-refresh:hover { background: #ffcd38; }
+.btn-refresh:disabled { background: rgba(255,255,255,0.25); color: rgba(255,255,255,0.75); }
 .topbar .brand-tag {
   margin-left: 8px;
   background: rgba(255,255,255,0.12);
@@ -147,7 +158,36 @@ select:focus, input:focus { border-color: var(--accent); }
 }
 .caveat-banner code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 5px; }
 
-.status-bar { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; padding: 0 4px; }
+.status-bar { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; padding: 0 4px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* "Filters apply automatically" hint, in place of the old Apply button. */
+.auto-apply {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 980px;
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+/* Sits at the far right of whichever toolbar row it lands on, so the row
+   doesn't read as a half-filled line of controls. */
+.auto-apply-note { justify-content: flex-end; margin-left: auto; }
+
+/* Cache / freshness readout beside the status line. */
+.cache-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 980px;
+  background: var(--grey-bg);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cache-pill.is-cached { background: var(--green-bg); color: #1a7f37; border: 1px solid rgba(48,209,88,0.25); }
+.cache-pill.is-fresh { background: var(--accent-bg); color: var(--accent); border: 1px solid rgba(61,33,102,0.14); }
+.cache-pill.is-loading { background: var(--orange-bg); color: #8a5a00; border: 1px solid #ffe0b2; }
 
 /* ─── View tabs (still OOS / back in stock) ──── */
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -374,4 +414,10 @@ tbody tr:last-child td { border-bottom: none; }
 @media (max-width: 900px) {
   .toolbar { flex-direction: column; align-items: stretch; }
   .filter-group.grow { min-width: 0; }
+  .auto-apply-note { align-items: flex-start; }
+  /* Narrow screens: let Refresh wrap onto its own line rather than squeezing
+     the brand, and drop the last-synced hint it would collide with. */
+  .topbar { flex-wrap: wrap; }
+  .topbar-actions { margin-left: auto; }
+  .topbar-hint { display: none; }
 }

@@ -13,6 +13,13 @@
     <img class="logo-mark" src="https://play-lh.googleusercontent.com/XPaIW4RsTkd8au1rBlcwAtdyynz9pZyPVn3QPK4gXbboroWxFI3hpVhn18IrIBrUtztj=w240-h480-rw" alt="Kapruka">
     <span class="brand-name">kapruka.</span>
     <span class="brand-tag">Out of Stock Dashboard</span>
+    <!-- Refresh lives top right, out of the filter toolbar: it's the one
+         control that changes the underlying data (a GA4 pull), not the view,
+         and the filters below now apply on their own with no Apply button. -->
+    <div class="topbar-actions">
+      <span class="topbar-hint" id="topbarHint"></span>
+      <button class="btn btn-refresh" id="refreshBtn" title="Pull the last 30 days of out_of_stock_view events from GA4">↻ Refresh Data</button>
+    </div>
   </div>
 
   <header>
@@ -67,11 +74,13 @@
       </div>
       <div class="filter-group">
         <label>&nbsp;</label>
-        <button class="btn btn-primary" id="refreshBtn">↻ Refresh Data</button>
-      </div>
-      <div class="filter-group">
-        <label>&nbsp;</label>
         <button class="btn btn-secondary" id="exportBtn">⬇ Export to Excel</button>
+      </div>
+      <!-- No Apply button by design: every control above re-queries as soon
+           as it changes (the search box debounces). -->
+      <div class="filter-group auto-apply-note">
+        <label>&nbsp;</label>
+        <span class="auto-apply">⚡ Filters apply automatically</span>
       </div>
     </div>
 
@@ -84,7 +93,12 @@
       fixing the event's user/session identification at the source.
     </div>
 
-    <div class="status-bar" id="statusBar"></div>
+    <div class="status-bar" id="statusBar">
+      <span id="statusText"></span>
+      <!-- Says whether the rows on screen came from the in-process cache or a
+           cold SQLite rollup, so a slow filter change is explainable. -->
+      <span class="cache-pill" id="cachePill" hidden></span>
+    </div>
 
     <!-- Two views over the same data: products still firing out_of_stock_view,
          and the ones the recency gate dropped (presumed back in stock). -->

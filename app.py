@@ -35,6 +35,21 @@ GA4, so partners are grouped and labelled by this code alone.
 Storage: SQLite (data.db, next to this file), refreshed on demand from GA4 -
 no daily ingest script needed, unlike hygiene-dashboard.
 
+Caching: every read endpoint is a pure function of (the rows in oos_daily,
+the filter arguments, today's recency cutoff), because the rows only change
+when someone clicks "Refresh from GA4" (or runs the category backfill). So
+results are memoised in-process (see the cache section below) and the cache
+is dropped wholesale on any write, rather than guessed at with a short TTL.
+On a real month (~490k rows / ~28k products) the per-product rollup is
+~2.5s of SQLite work, and the UI fires it on every filter change, so without
+this each filter touch cost a couple of seconds. Two details worth keeping:
+the cached rollup is stored *unsorted* and sorted per request, so changing
+sort or page is a cache hit; and cache keys carry both a data version
+counter and the cutoff date, so no entry can outlive a refresh or a
+midnight rollover. Entries are evicted by total rows held, not just entry
+count - one unfiltered month rollup is ~20MB, so a plain 24-entry LRU of
+those would be ~0.5GB on the VPS.
+
 `days_oos` is a GA4-visit proxy for time out of stock: the count of days in
 the selected window where the product had at least one out_of_stock_view
 event. GA4 has no direct inventory feed, so a day with zero site traffic to
@@ -88,7 +103,9 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import httpx
@@ -175,6 +192,86 @@ app = FastAPI(title="Kapruka Out-of-Stock Dashboard")
 
 _resolved_dims: dict[str, str] = {}
 _token_cache = {"token": None, "expiry": 0}
+
+
+# ------------------------------------------------------------------ cache
+# See the "Caching" paragraph in the module docstring for why a plain
+# in-process memo is the right shape here (data changes only on an explicit
+# refresh, so there is nothing to poll for).
+#
+# TTL is a backstop, not the invalidation mechanism: correctness comes from
+# _data_version (bumped on every write) and the cutoff date being part of
+# every key. Set CACHE_TTL_SECONDS=0 to disable expiry entirely.
+CACHE_TTL_SECONDS = float(os.environ.get("CACHE_TTL_SECONDS", "900"))
+CACHE_MAX_ENTRIES = max(1, int(os.environ.get("CACHE_MAX_ENTRIES", "24")))
+# Row budget across the whole cache. A full unfiltered month rollup is ~28k
+# product dicts (~20MB), so entry count alone is a bad size proxy.
+CACHE_MAX_ROWS = max(1000, int(os.environ.get("CACHE_MAX_ROWS", "80000")))
+
+_MISS = object()
+_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+_cache_rows = 0
+_cache_lock = threading.Lock()  # these endpoints run in FastAPI's threadpool
+_cache_stats = {"hits": 0, "misses": 0, "evictions": 0, "invalidations": 0}
+# Bumped by invalidate_cache() on every write to oos_daily. Part of every
+# cache key, so even a missed clear can't serve pre-refresh data.
+_data_version = 0
+
+
+def _drop(key: tuple) -> None:
+    """Remove one entry and give its rows back to the budget. Lock held."""
+    global _cache_rows
+    entry = _cache.pop(key, None)
+    if entry:
+        _cache_rows -= entry["rows"]
+
+
+def cache_get(key: tuple):
+    """Cached value for `key`, or the _MISS sentinel (None is a valid value)."""
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            _cache_stats["misses"] += 1
+            return _MISS
+        if CACHE_TTL_SECONDS and (time.time() - entry["at"]) > CACHE_TTL_SECONDS:
+            _drop(key)
+            _cache_stats["misses"] += 1
+            return _MISS
+        _cache.move_to_end(key)
+        _cache_stats["hits"] += 1
+        return entry["value"]
+
+
+def cache_put(key: tuple, value, rows: int = 1):
+    """Store `value`, evicting least-recently-used entries until both the
+    entry count and the row budget fit. `rows` is how many result rows the
+    value holds, for the size budget."""
+    global _cache_rows
+    with _cache_lock:
+        _drop(key)  # replacing: don't double-count its rows
+        _cache[key] = {"value": value, "rows": rows, "at": time.time()}
+        _cache_rows += rows
+        while _cache and (len(_cache) > CACHE_MAX_ENTRIES or _cache_rows > CACHE_MAX_ROWS):
+            oldest = next(iter(_cache))
+            if oldest == key:
+                break  # never evict the entry just written, even if oversized
+            _drop(oldest)
+            _cache_stats["evictions"] += 1
+    return value
+
+
+def invalidate_cache() -> int:
+    """Drop everything and bump the data version. Called after any write to
+    oos_daily (GA4 refresh, category backfill) - the data those entries were
+    computed from no longer exists."""
+    global _cache_rows, _data_version
+    with _cache_lock:
+        dropped = len(_cache)
+        _cache.clear()
+        _cache_rows = 0
+        _data_version += 1
+        _cache_stats["invalidations"] += 1
+    return dropped
 
 
 # ------------------------------------------------------------------ auth
@@ -449,6 +546,9 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
     con.commit()
     con.close()
 
+    # Everything cached was computed from the rows we just overwrote.
+    invalidate_cache()
+
     return {"ok": True, "rows_upserted": n, "date_range": {"start": start_s, "end": end_s}}
 
 
@@ -489,23 +589,32 @@ async def api_backfill_categories():
         updated += 1
     con.commit()
     con.close()
+    invalidate_cache()  # category/partner/source on cached rows just changed
     return {"ok": True, "products_updated": updated}
 
 
 @app.get("/api/categories")
 async def api_categories():
+    key = ("categories", _data_version)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit
     con = db()
     rows = con.execute("SELECT DISTINCT category FROM oos_daily WHERE category IS NOT NULL ORDER BY category").fetchall()
     con.close()
-    return [r["category"] for r in rows]
+    return cache_put(key, [r["category"] for r in rows], rows=len(rows))
 
 
 @app.get("/api/partners")
 async def api_partners():
+    key = ("partners", _data_version)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit
     con = db()
     rows = con.execute("SELECT DISTINCT partner_code FROM oos_daily WHERE partner_code IS NOT NULL ORDER BY partner_code").fetchall()
     con.close()
-    return [r["partner_code"] for r in rows]
+    return cache_put(key, [r["partner_code"] for r in rows], rows=len(rows))
 
 
 @app.get("/api/sources")
@@ -555,13 +664,32 @@ def active_product_codes(con: sqlite3.Connection, cutoff: str) -> set[str]:
     slice, so narrowing by date first beats scanning the product-ordered
     covering index (0.46s vs 0.76s on a real month). The hint also stops the
     plan flip-flopping depending on whether ANALYZE has ever been run.
+
+    Cached: every endpoint needs this set, it depends on nothing but the
+    cutoff, and it is the same ~0.5s query each time. Callers must treat the
+    returned set as read-only - it is the cached object itself.
     """
+    key = ("active_codes", _data_version, cutoff)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit
     rows = con.execute(
         "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_date"
         " WHERE date >= ? AND oos_views > 0",
         (cutoff,),
     ).fetchall()
-    return {r["product_code"] for r in rows}
+    codes = {r["product_code"] for r in rows}
+    return cache_put(key, codes, rows=len(codes))
+
+
+def latest_data_date(con: sqlite3.Connection) -> str | None:
+    """Newest date held in oos_daily - the "is this data stale?" reference."""
+    key = ("latest_date", _data_version)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit
+    row = con.execute("SELECT MAX(date) d FROM oos_daily").fetchone()
+    return cache_put(key, row["d"] if row else None)
 
 
 def fetch_filtered_products(
@@ -574,7 +702,35 @@ def fetch_filtered_products(
 
     Returns (items, recency_meta). Every product code in `items` has passed
     the recency gate, so both the table and the export apply it identically.
+
+    The rollup itself is cached by filter args only (see _active_rollup);
+    sorting happens here on a fresh list, so flipping a column or a page
+    never re-runs the ~2.5s query. meta carries `cached`/`query_ms` for the
+    UI's "served from cache" note.
     """
+    t0 = time.perf_counter()
+    cached_items, cached_meta, hit = _active_rollup(start, end, category, partner, source, q)
+    items = sorted(cached_items, key=SORT_KEYS[sort], reverse=(dir == "desc"))
+    meta = {**cached_meta, "cached": hit, "query_ms": round((time.perf_counter() - t0) * 1000, 1)}
+    return items, meta
+
+
+def _active_rollup(
+    start: str | None, end: str | None, category: str | None, partner: str | None,
+    source: str | None, q: str | None,
+) -> tuple[list[dict], dict, bool]:
+    """Unsorted, gated per-product rollup for the active report, memoised.
+
+    Returns (items, recency_meta, was_cache_hit). The returned list and meta
+    are the cached objects - callers must copy before mutating or sorting in
+    place.
+    """
+    key = ("active_rollup", _data_version, recency_cutoff_date(),
+           start, end, category, partner, source, q)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit[0], hit[1], True
+
     con = db()
     query = """SELECT product_code, MAX(product_name) product_name,
                       MAX(partner_code) partner_code, MAX(category) category,
@@ -609,7 +765,7 @@ def fetch_filtered_products(
 
     cutoff = recency_cutoff_date()
     active = active_product_codes(con, cutoff)
-    latest_data_date = con.execute("SELECT MAX(date) d FROM oos_daily").fetchone()["d"]
+    newest = latest_data_date(con)
     con.close()
 
     items = [{
@@ -634,16 +790,16 @@ def fetch_filtered_products(
         "cutoff": cutoff,
         "hidden_stale": matched_before_gate - len(items),
         "matched_before_gate": matched_before_gate,
-        "latest_data_date": latest_data_date,
+        "latest_data_date": newest,
         # True when the DB itself has no data as recent as the cutoff (e.g.
         # nobody has hit "Refresh from GA4" for a few days, or GA4's own
         # ~1-day reporting lag) - in that case the report is empty because
         # the data is stale, not because every product came back in stock.
-        "data_stale": bool(latest_data_date and latest_data_date < cutoff),
+        "data_stale": bool(newest and newest < cutoff),
     }
 
-    items.sort(key=SORT_KEYS[sort], reverse=(dir == "desc"))
-    return items, recency
+    cache_put(key, (items, recency), rows=len(items))
+    return items, recency, False
 
 
 def _days_between(earlier: str | None, later: str | None) -> int | None:
@@ -711,7 +867,31 @@ def fetch_recovered_products(
     dates - which days_since_last_oos needs ("back in stock for N days" has
     to be measured from the real last hit, not from wherever the window was
     cut).
+
+    Cached the same way as the active report: the rollup is memoised unsorted
+    by filter args (see _recovered_rollup) and sorted per request here, so
+    re-sorting or paging costs nothing.
     """
+    t0 = time.perf_counter()
+    cached_items, cached_meta, hit = _recovered_rollup(category, partner, source, q,
+                                                       oos_start, oos_end)
+    items = sorted(cached_items, key=RECOVERED_SORT_KEYS[sort], reverse=(dir == "desc"))
+    meta = {**cached_meta, "cached": hit, "query_ms": round((time.perf_counter() - t0) * 1000, 1)}
+    return items, meta
+
+
+def _recovered_rollup(
+    category: str | None, partner: str | None, source: str | None, q: str | None,
+    oos_start: str | None, oos_end: str | None,
+) -> tuple[list[dict], dict, bool]:
+    """Unsorted back-in-stock rollup, memoised. Returns the cached list/meta
+    objects - copy before mutating."""
+    key = ("recovered_rollup", _data_version, recency_cutoff_date(),
+           category, partner, source, q, oos_start, oos_end)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit[0], hit[1], True
+
     con = db()
     # Window predicate, repeated inside each aggregate. Empty when no range is
     # set, in which case every figure covers all synced dates as before.
@@ -756,7 +936,7 @@ def fetch_recovered_products(
 
     cutoff = recency_cutoff_date()
     active = active_product_codes(con, cutoff)
-    latest_data_date = con.execute("SELECT MAX(date) d FROM oos_daily").fetchone()["d"]
+    newest = latest_data_date(con)
     con.close()
 
     from datetime import date
@@ -791,7 +971,7 @@ def fetch_recovered_products(
         "days": RECENCY_GATE_DAYS,
         "cutoff": cutoff,
         "recovered": len(items),
-        "latest_data_date": latest_data_date,
+        "latest_data_date": newest,
         # Echoed back so the UI can say which dates the figures were counted
         # over (all synced dates when both are null).
         "oos_start": oos_start,
@@ -799,11 +979,11 @@ def fetch_recovered_products(
         # Same trap as the main report, pointed the other way: if the DB
         # hasn't been refreshed past the cutoff, EVERY product looks
         # recovered because the data stops, not because stock came back.
-        "data_stale": bool(latest_data_date and latest_data_date < cutoff),
+        "data_stale": bool(newest and newest < cutoff),
     }
 
-    items.sort(key=RECOVERED_SORT_KEYS[sort], reverse=(dir == "desc"))
-    return items, meta
+    cache_put(key, (items, meta), rows=len(items))
+    return items, meta, False
 
 
 @app.get("/api/products")
@@ -857,6 +1037,10 @@ async def api_tab_counts(
     honours `oos_start`/`oos_end` (the back-in-stock tab's own date range)
     instead, counting any product with an OOS hit inside those dates, so the
     badge never disagrees with the row count on the tab itself.
+
+    Each half is cached separately under its own filter key, because the UI
+    asks for them at different times (`need`) and with different date args -
+    one shared key would miss constantly.
     """
     oos_start, oos_end = validate_window(oos_start, oos_end)
     con = db()
@@ -882,21 +1066,28 @@ async def api_tab_counts(
     active = active_product_codes(con, cutoff)
 
     out: dict = {"cutoff": cutoff}
+    cached = True  # flipped false as soon as either half has to hit SQLite
 
     if need in ("both", "active"):
         # Active tab: codes with a hit inside the date range that also pass the gate.
-        sql = "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup WHERE oos_views > 0"
-        params: list = []
-        if start:
-            sql += " AND date >= ?"
-            params.append(start)
-        if end:
-            sql += " AND date <= ?"
-            params.append(end)
-        sql += shared_sql
-        params += shared_params
-        in_range = {r["product_code"] for r in con.execute(sql, params).fetchall()}
-        out["active"] = len(in_range & active)
+        key = ("count_active", _data_version, cutoff, start, end, category, partner, source, q)
+        hit = cache_get(key)
+        if hit is not _MISS:
+            out["active"] = hit
+        else:
+            cached = False
+            sql = "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup WHERE oos_views > 0"
+            params: list = []
+            if start:
+                sql += " AND date >= ?"
+                params.append(start)
+            if end:
+                sql += " AND date <= ?"
+                params.append(end)
+            sql += shared_sql
+            params += shared_params
+            in_range = {r["product_code"] for r in con.execute(sql, params).fetchall()}
+            out["active"] = cache_put(key, len(in_range & active))
 
     if need in ("both", "recovered"):
         # Back-in-stock tab: codes out of stock at some point inside that tab's
@@ -904,23 +1095,31 @@ async def api_tab_counts(
         # gate. A plain date-bounded DISTINCT, matching the tab's own overlap
         # rule - products are trimmed to the range now, not dropped for
         # straddling its edges.
-        rec_sql = ("SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup"
-                   " WHERE oos_views > 0")
-        rec_params: list = []
-        if oos_start:
-            rec_sql += " AND date >= ?"
-            rec_params.append(oos_start)
-        if oos_end:
-            rec_sql += " AND date <= ?"
-            rec_params.append(oos_end)
-        rec_sql += shared_sql
-        rec_params += shared_params
-        ever = {r["product_code"] for r in con.execute(rec_sql, rec_params).fetchall()}
-        out["recovered"] = len(ever - active)
+        key = ("count_recovered", _data_version, cutoff, oos_start, oos_end,
+               category, partner, source, q)
+        hit = cache_get(key)
+        if hit is not _MISS:
+            out["recovered"] = hit
+        else:
+            cached = False
+            rec_sql = ("SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup"
+                       " WHERE oos_views > 0")
+            rec_params: list = []
+            if oos_start:
+                rec_sql += " AND date >= ?"
+                rec_params.append(oos_start)
+            if oos_end:
+                rec_sql += " AND date <= ?"
+                rec_params.append(oos_end)
+            rec_sql += shared_sql
+            rec_params += shared_params
+            ever = {r["product_code"] for r in con.execute(rec_sql, rec_params).fetchall()}
+            out["recovered"] = cache_put(key, len(ever - active))
         out["oos_start"] = oos_start
         out["oos_end"] = oos_end
 
     con.close()
+    out["cached"] = cached
     return out
 
 
@@ -1097,9 +1296,13 @@ async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
 
 @app.get("/api/status")
 async def api_status():
+    cutoff = recency_cutoff_date()
+    key = ("status", _data_version, cutoff)
+    hit = cache_get(key)
+    if hit is not _MISS:
+        return hit
     con = db()
     row = con.execute("SELECT MAX(updated_at) last_updated, COUNT(DISTINCT product_code) products, MIN(date) min_date, MAX(date) max_date FROM oos_daily").fetchone()
-    cutoff = recency_cutoff_date()
     active = len(active_product_codes(con, cutoff))
     con.close()
     out = dict(row) if row else {}
@@ -1108,7 +1311,32 @@ async def api_status():
     out["active_products"] = active
     out["recency_days"] = RECENCY_GATE_DAYS
     out["recency_cutoff"] = cutoff
-    return out
+    return cache_put(key, out)
+
+
+@app.get("/api/cache")
+async def api_cache():
+    """What the in-process cache currently holds. Diagnostic only - useful for
+    checking a slow dashboard is actually missing rather than re-querying
+    because something bumped the data version."""
+    with _cache_lock:
+        return {
+            "entries": len(_cache),
+            "rows_held": _cache_rows,
+            "max_entries": CACHE_MAX_ENTRIES,
+            "max_rows": CACHE_MAX_ROWS,
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "data_version": _data_version,
+            **_cache_stats,
+        }
+
+
+@app.post("/api/cache/clear")
+async def api_cache_clear():
+    """Force a cold read on the next request. Only needed if data.db is
+    modified out-of-band (e.g. a manual SQLite edit on the VPS) - the GA4
+    refresh and the category backfill already clear it themselves."""
+    return {"ok": True, "entries_dropped": invalidate_cache()}
 
 
 # ------------------------------------------------------------------ static

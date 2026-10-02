@@ -39,6 +39,14 @@ date range returns 400 with the reason. A full month on this property is
 - **Source** — Partner Central and/or Ecommerce (Kapruka's own catalog)
 - **Search** — product code or name
 
+There is no Apply button: every filter re-queries the moment it changes (the
+search box debounces 400ms, and a date pair is coalesced so setting both
+ends fires one request). Responses carry a sequence number client-side, so a
+slow earlier request can't land after a newer one and paint rows that don't
+match the controls on screen. **Refresh Data** sits in the top bar, far
+right — it pulls new data from GA4 rather than changing the view, so it is
+deliberately not part of the filter toolbar.
+
 Demand is reported as the raw **OOS Views** count. There is no derived
 "Interest" High/Medium/Low column — it was removed, since it only re-bucketed
 that same count by percentile and implied more precision than GA4 supports
@@ -145,6 +153,35 @@ Two things to leave alone unless you re-measure:
 The index is roughly table-sized on disk (~182 MB total for September
 alone), and `init_db()` builds it at startup, which takes a few seconds the
 first time after deploying onto an existing `data.db`.
+
+### Caching
+
+Even at 2.5s a rollup, the filters re-query on every change, so results are
+cached in-process. The data only changes when someone clicks **Refresh
+Data**, so there is nothing to poll: the whole cache is dropped on any write
+(`invalidate_cache()` after a GA4 refresh or the category backfill), and
+every key carries a data-version counter plus today's recency cutoff date,
+so no entry can survive a refresh or a midnight rollover. Measured on
+September 2026 data:
+
+| | cold | cached |
+|---|---|---|
+| `/api/products`, no filters (24,233 products) | 2.0s | 15ms |
+| `/api/products`, `category=grocery` | 0.63s | <1ms |
+| re-sort or page the same filters | full re-query | <1ms |
+
+Re-sorting is free because the cached rollup is stored **unsorted** and
+sorted per request — sort/dir/limit/offset are deliberately not part of the
+cache key. The status line shows which you got (`⚡ cached` / `🗄 fresh
+query`), and `GET /api/cache` returns entries, rows held, hits/misses and
+the current data version; `POST /api/cache/clear` forces a cold read if
+`data.db` is ever edited out of band.
+
+Entries are evicted by **total rows held**, not entry count — one unfiltered
+month rollup is ~28k product dicts (~20 MB), so a plain 24-entry LRU of
+those would be ~0.5 GB. Defaults: `CACHE_MAX_ROWS=80000` (~55 MB),
+`CACHE_MAX_ENTRIES=24`, `CACHE_TTL_SECONDS=900` (a backstop only;
+correctness comes from the version counter). All three are `.env`-overridable.
 
 ## Custom dimensions (GA4 Admin > Custom Definitions)
 | Display name in GA4 UI | Event parameter | API name |

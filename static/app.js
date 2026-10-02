@@ -58,28 +58,60 @@ async function loadFilters() {
     fetch('/api/categories').then(r => r.json()),
     fetch('/api/partners').then(r => r.json()),
   ]);
-  const catSel = el('categoryFilter');
-  cats.forEach(c => {
+  // Rebuilt, not appended to: loadFilters() also runs after a GA4 refresh,
+  // and appending there duplicated every category/partner in the dropdowns.
+  // The current selection is preserved if the new data still contains it.
+  fillSelect(el('categoryFilter'), cats, 'All categories');
+  fillSelect(el('partnerFilter'), partners, 'All partners');
+}
+
+function fillSelect(sel, values, allLabel) {
+  const previous = sel.value;
+  sel.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = ''; all.textContent = allLabel;
+  sel.appendChild(all);
+  values.forEach(v => {
     const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    catSel.appendChild(opt);
+    opt.value = v; opt.textContent = v;
+    sel.appendChild(opt);
   });
-  const partnerSel = el('partnerFilter');
-  partners.forEach(p => {
-    const opt = document.createElement('option');
-    opt.value = p; opt.textContent = p;
-    partnerSel.appendChild(opt);
-  });
+  sel.value = values.includes(previous) ? previous : '';
 }
 
 async function loadStatus() {
   const s = await fetch('/api/status').then(r => r.json());
-  const bar = el('statusBar');
+  const text = el('statusText');
   if (!s || !s.products) {
-    bar.textContent = 'No data yet — click "Refresh Data" to pull the latest out-of-stock events.';
+    text.textContent = 'No data yet — click "Refresh Data" (top right) to pull the latest out-of-stock events.';
+    el('topbarHint').textContent = 'no data yet';
     return;
   }
-  bar.textContent = `${s.products} products tracked (${s.active_products} active in the last ${s.recency_days} day${s.recency_days === 1 ? '' : 's'}) · data ${s.min_date} → ${s.max_date} · last refreshed ${s.last_updated || '—'}`;
+  text.textContent = `${s.products} products tracked (${s.active_products} active in the last ${s.recency_days} day${s.recency_days === 1 ? '' : 's'}) · data ${s.min_date} → ${s.max_date} · last refreshed ${s.last_updated || '—'}`;
+  el('topbarHint').textContent = s.max_date ? `data through ${s.max_date}` : '';
+}
+
+// Cache readout next to the status line: whether these rows came from the
+// server's in-process cache or a cold SQLite rollup (~2.5s on a full month),
+// so a slow filter change is explainable rather than looking broken.
+function renderCachePill(meta, loading) {
+  const pill = el('cachePill');
+  pill.classList.remove('is-cached', 'is-fresh', 'is-loading');
+  if (loading) {
+    pill.hidden = false;
+    pill.classList.add('is-loading');
+    pill.textContent = '⏳ filtering…';
+    return;
+  }
+  if (!meta || meta.cached === undefined) { pill.hidden = true; return; }
+  pill.hidden = false;
+  const ms = meta.query_ms;
+  const time = ms === undefined ? '' : ms < 1000 ? ` (${Math.round(ms)} ms)` : ` (${(ms / 1000).toFixed(1)} s)`;
+  pill.classList.add(meta.cached ? 'is-cached' : 'is-fresh');
+  pill.textContent = meta.cached ? `⚡ cached${time}` : `🗄 fresh query${time}`;
+  pill.title = meta.cached
+    ? 'Served from the server cache. It is cleared automatically whenever you click Refresh Data.'
+    : 'Computed from SQLite just now, then cached for the next time these filters are used.';
 }
 
 // The recency gate is applied server-side to every view and to the export;
@@ -145,15 +177,33 @@ function buildQuery() {
   return params.toString();
 }
 
+// Monotonic request id. Filters auto-apply, so a user can change two of them
+// inside one 2-second query; without this the slower first response could land
+// last and paint rows that don't match the filters on screen.
+let loadSeq = 0;
+
 async function loadProducts(resetPage = true) {
   const view = state.view;
   if (resetPage) state[view].offset = 0;
+  const seq = ++loadSeq;
   const body = el(cfg().body);
   body.innerHTML = `<tr><td colspan="${cfg().cols}" class="empty-state">Loading…</td></tr>`;
-  const data = await fetch(`${cfg().endpoint}?${buildQuery()}`).then(r => r.json());
+  renderCachePill(null, true);
+  let data;
+  try {
+    data = await fetch(`${cfg().endpoint}?${buildQuery()}`).then(r => r.json());
+  } catch (e) {
+    if (seq !== loadSeq) return;
+    renderCachePill(null, false);
+    body.innerHTML = `<tr><td colspan="${cfg().cols}" class="empty-state">Could not load products: ${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+  // A newer filter change already fired - that request owns the table now.
+  if (seq !== loadSeq) return;
   state[view].items = data.items || [];
   state[view].total = data.count || 0;
   renderRecencyNote(data.recency);
+  renderCachePill(data.recency, false);
   renderTable();
   renderPagination();
   renderTabCounts();
@@ -168,8 +218,11 @@ function renderTabCounts() {
 // re-run its whole per-product rollup (seconds, on a real month of data)
 // just to read one number, so there's a dedicated count-only endpoint that
 // both badges come from instead.
+let countSeq = 0;
+
 async function loadOtherTabCount() {
   const other = state.view === 'active' ? 'recovered' : 'active';
+  const seq = ++countSeq;
   try {
     const params = new URLSearchParams();
     if (el('startDate').value) params.set('start', el('startDate').value);
@@ -184,9 +237,11 @@ async function loadOtherTabCount() {
     if (el('oosEndDate').value) params.set('oos_end', el('oosEndDate').value);
     params.set('need', other);  // skip the half this page already knows exactly
     const counts = await fetch(`/api/tab-counts?${params.toString()}`).then(r => r.json());
+    if (seq !== countSeq) return;  // superseded by a newer filter change
     state[other].total = counts[other] || 0;
     el(VIEWS[other].count).textContent = state[other].total.toLocaleString();
   } catch (e) {
+    if (seq !== countSeq) return;
     el(VIEWS[other].count).textContent = '—';
   }
 }
@@ -509,11 +564,24 @@ el('trendModal').addEventListener('click', (e) => {
   if (e.target === el('trendModal')) el('trendModal').classList.remove('open');
 });
 
-// Filters auto-apply: every select fires immediately on change, the search
-// box debounces so it doesn't re-query on every keystroke.
+// Filters auto-apply - there is no Apply button. Every select and date input
+// re-queries as soon as it changes; the search box debounces so it doesn't
+// re-query on every keystroke. The short debounce here just coalesces two
+// changes made in quick succession (e.g. both ends of a date range) into one
+// request instead of firing a throwaway query for the half-set state.
+let filterDebounce;
+function applyFilters() {
+  clearTimeout(filterDebounce);
+  filterDebounce = setTimeout(() => loadProducts(), 150);
+}
+
 ['startDate', 'endDate', 'oosStartDate', 'oosEndDate',
  'categoryFilter', 'partnerFilter', 'sourceFilter'].forEach(id => {
-  el(id).addEventListener('change', () => loadProducts());
+  el(id).addEventListener('change', applyFilters);
+  // Date pickers in Chrome fire `input` (not `change`) when the field is
+  // cleared with the little ✕, which would otherwise leave the table showing
+  // the old range.
+  el(id).addEventListener('input', applyFilters);
 });
 
 // Date inputs can't be emptied from the keyboard in every browser, so the
@@ -534,12 +602,20 @@ el('searchBox').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { clearTimeout(searchDebounce); loadProducts(); }
 });
 
+// Pulls the last 30 days from GA4. This also clears the server-side cache,
+// so the reload right after it is a cold (fresh) query by design.
 el('refreshBtn').addEventListener('click', async () => {
   const btn = el('refreshBtn');
   btn.disabled = true;
   btn.textContent = '↻ Refreshing…';
   try {
-    await fetch('/api/refresh?days=30', { method: 'POST' });
+    const res = await fetch('/api/refresh?days=30', { method: 'POST' });
+    // fetch() doesn't throw on a 4xx/5xx, so a failed GA4 pull used to look
+    // like a successful refresh that simply changed nothing.
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status} ${res.statusText}`);
+    }
     await loadStatus();
     await loadFilters();
     await loadProducts();
