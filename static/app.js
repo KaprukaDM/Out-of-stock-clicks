@@ -604,18 +604,45 @@ el('searchBox').addEventListener('keydown', (e) => {
 
 // Pulls the last 30 days from GA4. This also clears the server-side cache,
 // so the reload right after it is a cold (fresh) query by design.
+//
+// /api/refresh starts the pull in the background and returns right away -
+// the pull itself (paginated GA4 calls) can run long enough to exceed
+// Cloudflare's or the origin proxy's own timeout, which used to surface as
+// a bare 502/524 here even on a refresh that finished successfully seconds
+// later server-side. Polling /api/refresh/status instead of awaiting one
+// long fetch sidesteps that: nothing times out the connection mid-pull
+// because there's no single long-lived connection anymore.
+async function pollRefreshStatus(btn) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const s = await fetch('/api/refresh/status').then((r) => r.json());
+    if (s.status === 'running') {
+      btn.textContent = '↻ Refreshing…';
+      continue;
+    }
+    if (s.status === 'error') {
+      throw new Error(s.error || 'Unknown error');
+    }
+    return s.result;
+  }
+}
+
 el('refreshBtn').addEventListener('click', async () => {
   const btn = el('refreshBtn');
   btn.disabled = true;
-  btn.textContent = '↻ Refreshing…';
+  btn.textContent = '↻ Starting…';
   try {
     const res = await fetch('/api/refresh?days=30', { method: 'POST' });
-    // fetch() doesn't throw on a 4xx/5xx, so a failed GA4 pull used to look
-    // like a successful refresh that simply changed nothing.
+    // fetch() doesn't throw on a 4xx/5xx, so a failed start (not the pull
+    // itself - that's what pollRefreshStatus surfaces) used to look like a
+    // successful refresh that simply changed nothing.
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.detail || `${res.status} ${res.statusText}`);
     }
+    const started = await res.json();
+    if (!started.ok) throw new Error(started.note || 'Could not start refresh');
+    await pollRefreshStatus(btn);
     await loadStatus();
     await loadFilters();
     await loadProducts();

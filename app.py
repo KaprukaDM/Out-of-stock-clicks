@@ -100,6 +100,7 @@ it - don't read this tab as an inventory feed.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sqlite3
@@ -192,6 +193,18 @@ app = FastAPI(title="Kapruka Out-of-Stock Dashboard")
 
 _resolved_dims: dict[str, str] = {}
 _token_cache = {"token": None, "expiry": 0}
+
+# A 30-day GA4 pull (paginated runReport calls, 60s httpx timeout each) can
+# run past Cloudflare's edge timeout (~100s) or the origin IIS/ARR reverse
+# proxy's own timeout - the browser then sees a bare 502/524 with no detail,
+# even though the backend keeps going and finishes the work seconds later
+# (confirmed live: /api/status showed fresh data right after a "failed"
+# refresh, and a direct curl reproduced a 524 after ~130s). Running the pull
+# as a background asyncio task and having the frontend poll
+# /api/refresh/status instead of awaiting one long request sidesteps both
+# proxies' timeouts - the GA4 pull itself is no faster, but nothing kills
+# the connection out from under it mid-flight anymore.
+_refresh_state: dict = {"status": "idle", "result": None, "error": None, "started_at": None, "finished_at": None}
 
 
 # ------------------------------------------------------------------ cache
@@ -552,6 +565,27 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
     return {"ok": True, "rows_upserted": n, "date_range": {"start": start_s, "end": end_s}}
 
 
+async def _run_refresh_in_background(days: int, start: str | None, end: str | None) -> None:
+    _refresh_state["status"] = "running"
+    _refresh_state["result"] = None
+    _refresh_state["error"] = None
+    _refresh_state["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _refresh_state["finished_at"] = None
+    try:
+        result = await refresh_from_ga4(days=days, start=start, end=end)
+        _refresh_state["status"] = "done"
+        _refresh_state["result"] = result
+    except Exception as e:
+        # Covers both the ValueError the sync caller used to turn into a 400
+        # (bad start/end) and anything else - there's no HTTP response left
+        # to attach a status code to once this is running in the background,
+        # so the message itself is what the frontend has to show.
+        _refresh_state["status"] = "error"
+        _refresh_state["error"] = str(e)
+    finally:
+        _refresh_state["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 # ------------------------------------------------------------------ API
 @app.post("/api/refresh")
 async def api_refresh(
@@ -559,17 +593,21 @@ async def api_refresh(
     start: str | None = Query(None, description="Backfill window start, YYYY-MM-DD"),
     end: str | None = Query(None, description="Backfill window end, YYYY-MM-DD (clamped to yesterday)"),
 ):
-    """Default pull is the last `days` days ending yesterday (the dashboard
-    button). Pass start/end to backfill an explicit past window, e.g.
-    ?start=2026-09-01&end=2026-09-30 for all of September - needed because
-    "last N days" can't reach a month once it has scrolled past."""
-    try:
-        return await refresh_from_ga4(days=days, start=start, end=end)
-    except ValueError as e:
-        # Bad start/end from the caller - a client error, not a server fault.
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Starts the GA4 pull in the background and returns immediately - see
+    _refresh_state's comment above for why. Default pull is the last `days`
+    days ending yesterday (the dashboard button). Pass start/end to backfill
+    an explicit past window, e.g. ?start=2026-09-01&end=2026-09-30 for all of
+    September - needed because "last N days" can't reach a month once it has
+    scrolled past. Poll GET /api/refresh/status for progress/outcome."""
+    if _refresh_state["status"] == "running":
+        return {"ok": True, "status": "running", "note": "A refresh is already in progress."}
+    asyncio.create_task(_run_refresh_in_background(days, start, end))
+    return {"ok": True, "status": "started"}
+
+
+@app.get("/api/refresh/status")
+async def api_refresh_status():
+    return _refresh_state
 
 
 @app.post("/api/backfill-categories")
