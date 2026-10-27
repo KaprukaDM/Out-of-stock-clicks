@@ -6,7 +6,7 @@ const PAGE_SIZE = 200;
 // Each keeps its own sort/page so switching tabs doesn't reset the other.
 const VIEWS = {
   active: {
-    endpoint: '/api/products',
+    endpoint: 'api/products',
     exportView: 'active',
     tableWrap: 'activeTableWrap',
     body: 'productsBody',
@@ -17,7 +17,7 @@ const VIEWS = {
     usesDateRange: true,
   },
   recovered: {
-    endpoint: '/api/back-in-stock',
+    endpoint: 'api/back-in-stock',
     exportView: 'back_in_stock',
     tableWrap: 'recoveredTableWrap',
     body: 'recoveredBody',
@@ -55,8 +55,8 @@ function defaultDates() {
 
 async function loadFilters() {
   const [cats, partners] = await Promise.all([
-    fetch('/api/categories').then(r => r.json()),
-    fetch('/api/partners').then(r => r.json()),
+    fetch('api/categories').then(r => r.json()),
+    fetch('api/partners').then(r => r.json()),
   ]);
   // Rebuilt, not appended to: loadFilters() also runs after a GA4 refresh,
   // and appending there duplicated every category/partner in the dropdowns.
@@ -80,7 +80,7 @@ function fillSelect(sel, values, allLabel) {
 }
 
 async function loadStatus() {
-  const s = await fetch('/api/status').then(r => r.json());
+  const s = await fetch('api/status').then(r => r.json());
   const text = el('statusText');
   if (!s || !s.products) {
     text.textContent = 'No data yet — click "Refresh Data" (top right) to pull the latest out-of-stock events.';
@@ -236,7 +236,7 @@ async function loadOtherTabCount() {
     if (el('oosStartDate').value) params.set('oos_start', el('oosStartDate').value);
     if (el('oosEndDate').value) params.set('oos_end', el('oosEndDate').value);
     params.set('need', other);  // skip the half this page already knows exactly
-    const counts = await fetch(`/api/tab-counts?${params.toString()}`).then(r => r.json());
+    const counts = await fetch(`api/tab-counts?${params.toString()}`).then(r => r.json());
     if (seq !== countSeq) return;  // superseded by a newer filter change
     state[other].total = counts[other] || 0;
     el(VIEWS[other].count).textContent = state[other].total.toLocaleString();
@@ -396,7 +396,7 @@ async function openTrend(productCode) {
   el('trendTitle').textContent = 'Loading trend…';
   el('trendMeta').innerHTML = '';
 
-  const data = await fetch(`/api/trend/${encodeURIComponent(productCode)}?days=90`).then(r => r.json());
+  const data = await fetch(`api/trend/${encodeURIComponent(productCode)}?days=90`).then(r => r.json());
   if (data.detail) {
     el('trendTitle').textContent = 'Not found';
     return;
@@ -615,7 +615,7 @@ el('searchBox').addEventListener('keydown', (e) => {
 async function pollRefreshStatus(btn) {
   for (;;) {
     await new Promise((r) => setTimeout(r, 2000));
-    const s = await fetch('/api/refresh/status').then((r) => r.json());
+    const s = await fetch('api/refresh/status').then((r) => r.json());
     if (s.status === 'running') {
       btn.textContent = '↻ Refreshing…';
       continue;
@@ -632,7 +632,7 @@ el('refreshBtn').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = '↻ Starting…';
   try {
-    const res = await fetch('/api/refresh?days=30', { method: 'POST' });
+    const res = await fetch('api/refresh?days=30', { method: 'POST' });
     // fetch() doesn't throw on a 4xx/5xx, so a failed start (not the pull
     // itself - that's what pollRefreshStatus surfaces) used to look like a
     // successful refresh that simply changed nothing.
@@ -658,7 +658,7 @@ el('refreshBtn').addEventListener('click', async () => {
 el('exportBtn').addEventListener('click', () => {
   const params = buildFilterParams();
   params.set('view', cfg().exportView);
-  window.location.href = `/api/export?${params.toString()}`;
+  window.location.href = `api/export?${params.toString()}`;
 });
 
 (async function init() {
