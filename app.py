@@ -392,13 +392,18 @@ def extract_source_type(product_code: str) -> str:
 
 # ------------------------------------------------------------------ db
 def db() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=60)
     con.row_factory = sqlite3.Row
     return con
 
 
 def init_db():
     con = db()
+    # WAL lets readers keep serving while a refresh writes. In the default
+    # rollback-journal mode a big upsert locked the DB for minutes, so every
+    # page load failed or hung until it finished. Persistent once set.
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     con.execute("""
     CREATE TABLE IF NOT EXISTS oos_daily (
         date TEXT NOT NULL,
@@ -544,7 +549,7 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
             for (date_s, code), rec in merged.items()
             if code and code != "(not set)"
         ]
-        con.executemany("""
+        sql = """
             INSERT INTO oos_daily (date, product_code, product_name, partner_code, category, source_type, oos_views, updated_at)
             VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(product_code, date) DO UPDATE SET
@@ -554,8 +559,11 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
                 source_type=excluded.source_type,
                 oos_views=excluded.oos_views,
                 updated_at=excluded.updated_at
-        """, params)
-        con.commit()
+        """
+        # Chunked commits keep each write transaction short.
+        for i in range(0, len(params), 20000):
+            con.executemany(sql, params[i:i + 20000])
+            con.commit()
         con.close()
         return len(params)
 
@@ -565,6 +573,7 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
 
     # Everything cached was computed from the rows we just overwrote.
     invalidate_cache()
+    threading.Thread(target=warm_cache, daemon=True).start()
 
     return {"ok": True, "rows_upserted": n, "date_range": {"start": start_s, "end": end_s}}
 
@@ -1356,6 +1365,27 @@ def api_status():
     return cache_put(key, out)
 
 
+def warm_cache() -> None:
+    """Pre-run the queries the page fires on load (default last-30-day
+    window), so the first visitor after a restart or refresh doesn't wait
+    10s+ on cold queries. Best effort."""
+    try:
+        from datetime import date, timedelta
+        end = (date.today() - timedelta(days=1)).isoformat()
+        start = (date.today() - timedelta(days=30)).isoformat()
+        api_status()
+        api_categories()
+        api_partners()
+        _active_rollup(start, end, None, None, None, None)
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+async def _warm_on_startup():
+    threading.Thread(target=warm_cache, daemon=True).start()
+
+
 @app.get("/api/cache")
 async def api_cache():
     """What the in-process cache currently holds. Diagnostic only - useful for
@@ -1384,7 +1414,7 @@ async def api_cache_clear():
 # ------------------------------------------------------------------ static
 @app.get("/")
 async def index():
-    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"), headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
@@ -1392,7 +1422,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 @app.get("/app.js")
 async def app_js():
-    return Response((STATIC / "app.js").read_text(encoding="utf-8"), media_type="application/javascript")
+    return Response((STATIC / "app.js").read_text(encoding="utf-8"), media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/style.css")
