@@ -559,7 +559,14 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
                 source_type=excluded.source_type,
                 oos_views=excluded.oos_views,
                 updated_at=excluded.updated_at
+            WHERE oos_daily.oos_views IS NOT excluded.oos_views
+               OR oos_daily.product_name IS NOT excluded.product_name
+               OR oos_daily.category IS NOT excluded.category
+               OR oos_daily.partner_code IS NOT excluded.partner_code
+               OR oos_daily.source_type IS NOT excluded.source_type
         """
+        # Re-pulling a window is mostly unchanged rows; skipping them avoids
+        # rewriting six indexes for each (the 14-minute refresh).
         # Chunked commits keep each write transaction short.
         for i in range(0, len(params), 20000):
             con.executemany(sql, params[i:i + 20000])
