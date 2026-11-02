@@ -615,7 +615,17 @@ el('searchBox').addEventListener('keydown', (e) => {
 async function pollRefreshStatus(btn) {
   for (;;) {
     await new Promise((r) => setTimeout(r, 2000));
-    const s = await fetch('api/refresh/status').then((r) => r.json());
+    // A 502/524 (HTML body) while the server is busy is transient - keep
+    // polling rather than aborting a refresh that is still running.
+    let s;
+    try {
+      const r = await fetch('api/refresh/status');
+      if (!r.ok) throw new Error(String(r.status));
+      s = await r.json();
+    } catch (_) {
+      btn.textContent = '↻ Refreshing…';
+      continue;
+    }
     if (s.status === 'running') {
       btn.textContent = '↻ Refreshing…';
       continue;

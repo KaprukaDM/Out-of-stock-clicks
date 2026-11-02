@@ -534,13 +534,17 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
         if name:
             rec["product_name"] = name
 
-    con = db()
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    n = 0
-    for (date_s, code), rec in merged.items():
-        if not code or code == "(not set)":
-            continue
-        con.execute("""
+    def write_rows() -> int:
+        con = db()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        params = [
+            (date_s, code, rec.get("product_name"),
+             extract_partner_code(code), extract_category(code), extract_source_type(code),
+             rec["oos_views"], now)
+            for (date_s, code), rec in merged.items()
+            if code and code != "(not set)"
+        ]
+        con.executemany("""
             INSERT INTO oos_daily (date, product_code, product_name, partner_code, category, source_type, oos_views, updated_at)
             VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(product_code, date) DO UPDATE SET
@@ -550,14 +554,14 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
                 source_type=excluded.source_type,
                 oos_views=excluded.oos_views,
                 updated_at=excluded.updated_at
-        """, (
-            date_s, code, rec.get("product_name"),
-            extract_partner_code(code), extract_category(code), extract_source_type(code),
-            rec["oos_views"], now,
-        ))
-        n += 1
-    con.commit()
-    con.close()
+        """, params)
+        con.commit()
+        con.close()
+        return len(params)
+
+    # Off the event loop: a big upsert used to freeze the whole server, so the
+    # status polls timed out at the proxy (502/524) mid-refresh.
+    n = await asyncio.to_thread(write_rows)
 
     # Everything cached was computed from the rows we just overwrote.
     invalidate_cache()
@@ -611,7 +615,7 @@ async def api_refresh_status():
 
 
 @app.post("/api/backfill-categories")
-async def api_backfill_categories():
+def api_backfill_categories():
     """Recompute category/source_type for every row already in the DB from
     extract_category()/extract_source_type() alone - no GA4 call. Lets a
     fixed extraction rule (e.g. the ecommerce category fallback) apply to
@@ -632,7 +636,7 @@ async def api_backfill_categories():
 
 
 @app.get("/api/categories")
-async def api_categories():
+def api_categories():
     key = ("categories", _data_version)
     hit = cache_get(key)
     if hit is not _MISS:
@@ -644,7 +648,7 @@ async def api_categories():
 
 
 @app.get("/api/partners")
-async def api_partners():
+def api_partners():
     key = ("partners", _data_version)
     hit = cache_get(key)
     if hit is not _MISS:
@@ -656,7 +660,7 @@ async def api_partners():
 
 
 @app.get("/api/sources")
-async def api_sources():
+def api_sources():
     return ["partner_central", "ecommerce"]
 
 
@@ -1025,7 +1029,7 @@ def _recovered_rollup(
 
 
 @app.get("/api/products")
-async def api_products(
+def api_products(
     start: str | None = None,
     end: str | None = None,
     category: str | None = None,
@@ -1049,7 +1053,7 @@ async def api_products(
 
 
 @app.get("/api/tab-counts")
-async def api_tab_counts(
+def api_tab_counts(
     start: str | None = None,
     end: str | None = None,
     category: str | None = None,
@@ -1162,7 +1166,7 @@ async def api_tab_counts(
 
 
 @app.get("/api/back-in-stock")
-async def api_back_in_stock(
+def api_back_in_stock(
     category: str | None = None,
     partner: str | None = None,
     source: str | None = None,
@@ -1195,7 +1199,7 @@ async def api_back_in_stock(
 
 
 @app.get("/api/export")
-async def api_export(
+def api_export(
     start: str | None = None,
     end: str | None = None,
     category: str | None = None,
@@ -1270,7 +1274,7 @@ async def api_export(
 
 
 @app.get("/api/trend/{product_code}")
-async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
+def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
     """Daily out_of_stock_view counts for one product, for the modal's chart.
 
     The series is zero-filled across every calendar day in the window, not
@@ -1333,7 +1337,7 @@ async def api_trend(product_code: str, days: int = Query(60, ge=1, le=180)):
 
 
 @app.get("/api/status")
-async def api_status():
+def api_status():
     cutoff = recency_cutoff_date()
     key = ("status", _data_version, cutoff)
     hit = cache_get(key)
