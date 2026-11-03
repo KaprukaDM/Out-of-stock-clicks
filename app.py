@@ -689,13 +689,13 @@ SORT_KEYS = {
     "days_oos": lambda i: i["days_oos"],
     "first_oos_date": lambda i: (i["first_oos_date"] or ""),
     "last_oos_date": lambda i: (i["last_oos_date"] or ""),
+    "oos_span_days": lambda i: i["oos_span_days"],
 }
 
 # Back-in-stock tab carries two extra sortable columns the active report has
 # no equivalent for (the span of the outage, and how long it's been over).
 RECOVERED_SORT_KEYS = {
     **SORT_KEYS,
-    "oos_span_days": lambda i: i["oos_span_days"],
     "days_since_last_oos": lambda i: (i["days_since_last_oos"] if i["days_since_last_oos"] is not None else -1),
 }
 
@@ -856,6 +856,11 @@ def _active_rollup(
     newest = latest_data_date(con)
     con.close()
 
+    def span_days(r) -> int:
+        # Same rule as the back-in-stock tab: inclusive first->last OOS hit.
+        span = _days_between(r["first_oos_date"], r["last_oos_date"])
+        return (span + 1) if span is not None else (r["days_oos"] or 0)
+
     items = [{
         "product_code": r["product_code"],
         "product_name": r["product_name"],
@@ -864,6 +869,7 @@ def _active_rollup(
         "source_type": r["source_type"],
         "oos_views": r["oos_views"],
         "days_oos": r["days_oos"],
+        "oos_span_days": span_days(r),
         "first_oos_date": r["first_oos_date"],
         "last_oos_date": r["last_oos_date"],
     } for r in rows]
@@ -1292,7 +1298,7 @@ def api_export(
         writer.writerow([
             "Product Code", "Product Name", "Partner Code", "Category", "Source",
             "Days OOS (days with events)", "OOS Span (calendar days)", "OOS Views",
-            "First OOS Date", "Last OOS Date", "Back In Stock For (days)",
+            "Back In Stock For (days)",
         ])
         for i in items:
             writer.writerow([
@@ -1300,7 +1306,6 @@ def api_export(
                 i["partner_code"] or "", i["category"] or "",
                 source_labels.get(i["source_type"], i["source_type"] or ""),
                 i["days_oos"], i["oos_span_days"], i["oos_views"],
-                i["first_oos_date"] or "", i["last_oos_date"] or "",
                 i["days_since_last_oos"] if i["days_since_last_oos"] is not None else "",
             ])
         filename = f"kapruka-back-in-stock-{time.strftime('%Y%m%d')}.csv"
@@ -1313,15 +1318,14 @@ def api_export(
         # Column order mirrors the dashboard table exactly.
         writer.writerow([
             "Product Code", "Product Name", "Partner Code", "Category",
-            "Source", "OOS Views", "Days OOS", "First OOS Date", "Last OOS Date",
+            "Source", "OOS Views", "Days OOS", "OOS Span (calendar days)",
         ])
         for i in items:
             writer.writerow([
                 i["product_code"], i["product_name"] or "",
                 i["partner_code"] or "", i["category"] or "",
                 source_labels.get(i["source_type"], i["source_type"] or ""),
-                i["oos_views"], i["days_oos"],
-                i["first_oos_date"] or "", i["last_oos_date"] or "",
+                i["oos_views"], i["days_oos"], i["oos_span_days"],
             ])
         filename = f"kapruka-out-of-stock-{time.strftime('%Y%m%d')}.csv"
 

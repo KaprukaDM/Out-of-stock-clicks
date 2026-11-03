@@ -122,12 +122,12 @@
             <th class="sortable" data-sort="partner_code">Partner</th>
             <th class="sortable" data-sort="category">Category</th>
             <th class="sortable" data-sort="oos_views">OOS Views</th>
-            <th class="sortable" data-sort="days_oos">Days OOS</th>
-            <th class="sortable" data-sort="last_oos_date">First / Last OOS</th>
+            <th class="sortable" data-sort="days_oos" title="Days that fired at least one out_of_stock_view event, inside the selected date range">Days OOS</th>
+            <th class="sortable" data-sort="oos_span_days" title="Calendar days from first to last out-of-stock hit in the selected range, inclusive">OOS Span</th>
           </tr>
         </thead>
         <tbody id="productsBody">
-          <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+          <tr><td colspan="8" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -143,12 +143,11 @@
             <th class="sortable" data-sort="days_oos" title="Days that fired at least one out_of_stock_view event, inside the selected OOS date range">Days OOS</th>
             <th class="sortable" data-sort="oos_span_days" title="Calendar days from first to last out-of-stock hit in the selected range, inclusive">OOS Span</th>
             <th class="sortable" data-sort="oos_views">OOS Views</th>
-            <th class="sortable" data-sort="last_oos_date">First / Last OOS</th>
             <th class="sortable" data-sort="days_since_last_oos" title="Days since the last out-of-stock hit">Back In Stock</th>
           </tr>
         </thead>
         <tbody id="recoveredBody">
-          <tr><td colspan="9" class="empty-state">Loading…</td></tr>
+          <tr><td colspan="8" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
     </div>

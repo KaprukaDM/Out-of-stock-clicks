@@ -13,7 +13,7 @@ const VIEWS = {
     table: 'productsTable',
     tab: 'tabActive',
     count: 'tabActiveCount',
-    cols: 7,
+    cols: 8,
     usesDateRange: true,
   },
   recovered: {
@@ -24,7 +24,7 @@ const VIEWS = {
     table: 'recoveredTable',
     tab: 'tabRecovered',
     count: 'tabRecoveredCount',
-    cols: 9,
+    cols: 8,
     // The back-in-stock figures default to all synced data, not the toolbar
     // range (a finished outage can sit entirely outside it), so the active
     // report's date inputs are hidden on this tab rather than silently
@@ -305,7 +305,7 @@ function activeRow(item) {
       <td>${item.category ? `<span class="category-badge">${escapeHtml(item.category)}</span>` : '—'}</td>
       <td class="num">${item.oos_views.toLocaleString()}</td>
       <td class="num">${item.days_oos}</td>
-      <td class="dates-cell">${item.first_oos_date || '—'} → ${item.last_oos_date || '—'}</td>
+      <td class="num"><span class="muted-note">${item.oos_span_days}d</span></td>
     </tr>
   `;
 }
@@ -326,7 +326,6 @@ function recoveredRow(item) {
       <td class="num days-oos-strong">${item.days_oos}</td>
       <td class="num"><span class="muted-note">${item.oos_span_days}d</span></td>
       <td class="num">${item.oos_views.toLocaleString()}</td>
-      <td class="dates-cell">${item.first_oos_date || '—'} → ${item.last_oos_date || '—'}</td>
       <td class="num">${backLabel}</td>
     </tr>
   `;
