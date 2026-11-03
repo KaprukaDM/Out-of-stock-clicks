@@ -215,11 +215,11 @@ _refresh_state: dict = {"status": "idle", "result": None, "error": None, "starte
 # TTL is a backstop, not the invalidation mechanism: correctness comes from
 # _data_version (bumped on every write) and the cutoff date being part of
 # every key. Set CACHE_TTL_SECONDS=0 to disable expiry entirely.
-CACHE_TTL_SECONDS = float(os.environ.get("CACHE_TTL_SECONDS", "900"))
-CACHE_MAX_ENTRIES = max(1, int(os.environ.get("CACHE_MAX_ENTRIES", "24")))
+CACHE_TTL_SECONDS = float(os.environ.get("CACHE_TTL_SECONDS", "43200"))
+CACHE_MAX_ENTRIES = max(1, int(os.environ.get("CACHE_MAX_ENTRIES", "48")))
 # Row budget across the whole cache. A full unfiltered month rollup is ~28k
 # product dicts (~20MB), so entry count alone is a bad size proxy.
-CACHE_MAX_ROWS = max(1000, int(os.environ.get("CACHE_MAX_ROWS", "80000")))
+CACHE_MAX_ROWS = max(1000, int(os.environ.get("CACHE_MAX_ROWS", "300000")))
 
 _MISS = object()
 _cache: "OrderedDict[tuple, dict]" = OrderedDict()
