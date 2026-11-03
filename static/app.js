@@ -54,18 +54,19 @@ function defaultDates() {
 }
 
 async function loadFilters() {
-  const [cats, partners] = await Promise.all([
+  const [cats, partners, partnerNames] = await Promise.all([
     fetch('api/categories').then(r => r.json()),
     fetch('api/partners').then(r => r.json()),
+    fetch('api/partner-names').then(r => r.json()).catch(() => ({})),
   ]);
   // Rebuilt, not appended to: loadFilters() also runs after a GA4 refresh,
   // and appending there duplicated every category/partner in the dropdowns.
   // The current selection is preserved if the new data still contains it.
   fillSelect(el('categoryFilter'), cats, 'All categories');
-  fillSelect(el('partnerFilter'), partners, 'All partners');
+  fillSelect(el('partnerFilter'), partners, 'All partners', (v) => (partnerNames[v] ? `${partnerNames[v]} (${v})` : v));
 }
 
-function fillSelect(sel, values, allLabel) {
+function fillSelect(sel, values, allLabel, labelOf = (v) => v) {
   const previous = sel.value;
   sel.innerHTML = '';
   const all = document.createElement('option');
@@ -73,7 +74,7 @@ function fillSelect(sel, values, allLabel) {
   sel.appendChild(all);
   values.forEach(v => {
     const opt = document.createElement('option');
-    opt.value = v; opt.textContent = v;
+    opt.value = v; opt.textContent = labelOf(v);
     sel.appendChild(opt);
   });
   sel.value = values.includes(previous) ? previous : '';
@@ -301,7 +302,7 @@ function activeRow(item) {
     <tr data-code="${escapeAttr(item.product_code)}">
       <td class="pc-code">${escapeHtml(item.product_code)}</td>
       <td>${escapeHtml(item.product_name || '—')}</td>
-      <td>${item.partner_code ? `<span class="partner-badge">${escapeHtml(item.partner_code)}</span>` : '—'}</td>
+      <td>${item.partner_code ? `<span class="partner-badge" title="${escapeAttr(item.partner_code)}">${escapeHtml(item.partner_name || item.partner_code)}</span>` : '—'}</td>
       <td>${item.category ? `<span class="category-badge">${escapeHtml(item.category)}</span>` : '—'}</td>
       <td class="num">${item.oos_views.toLocaleString()}</td>
       <td class="num">${item.days_oos}</td>
@@ -321,7 +322,7 @@ function recoveredRow(item) {
     <tr data-code="${escapeAttr(item.product_code)}">
       <td class="pc-code">${escapeHtml(item.product_code)}</td>
       <td>${escapeHtml(item.product_name || '—')}</td>
-      <td>${item.partner_code ? `<span class="partner-badge">${escapeHtml(item.partner_code)}</span>` : '—'}</td>
+      <td>${item.partner_code ? `<span class="partner-badge" title="${escapeAttr(item.partner_code)}">${escapeHtml(item.partner_name || item.partner_code)}</span>` : '—'}</td>
       <td>${item.category ? `<span class="category-badge">${escapeHtml(item.category)}</span>` : '—'}</td>
       <td class="num days-oos-strong">${item.days_oos}</td>
       <td class="num"><span class="muted-note">${item.oos_span_days}d</span></td>

@@ -361,6 +361,19 @@ def extract_partner_code(product_code: str) -> str | None:
     return "v" + m.group(1).zfill(5)
 
 
+def _load_partner_names() -> dict[str, str]:
+    """partner code (v04625) -> vendor name, from the Product-List report."""
+    try:
+        import json
+        with open(Path(__file__).with_name("partner_names.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+PARTNER_NAMES = _load_partner_names()
+
+
 def extract_category(product_code: str) -> str | None:
     """Category token out of the product code.
 
@@ -675,6 +688,11 @@ def api_partners():
     return cache_put(key, [r["partner_code"] for r in rows], rows=len(rows))
 
 
+@app.get("/api/partner-names")
+def api_partner_names():
+    return PARTNER_NAMES
+
+
 @app.get("/api/sources")
 def api_sources():
     return ["partner_central", "ecommerce"]
@@ -865,6 +883,7 @@ def _active_rollup(
         "product_code": r["product_code"],
         "product_name": r["product_name"],
         "partner_code": r["partner_code"],
+        "partner_name": PARTNER_NAMES.get(r["partner_code"] or ""),
         "category": r["category"],
         "source_type": r["source_type"],
         "oos_views": r["oos_views"],
@@ -1055,6 +1074,7 @@ def _recovered_rollup(
             "product_code": r["product_code"],
             "product_name": r["product_name"],
             "partner_code": r["partner_code"],
+            "partner_name": PARTNER_NAMES.get(r["partner_code"] or ""),
             "category": r["category"],
             "source_type": r["source_type"],
             "oos_views": r["oos_views"],
@@ -1296,14 +1316,14 @@ def api_export(
         items, _ = fetch_recovered_products(category, partner, source, q, sort, dir,
                                             oos_start=oos_start, oos_end=oos_end)
         writer.writerow([
-            "Product Code", "Product Name", "Partner Code", "Category", "Source",
+            "Product Code", "Product Name", "Partner Code", "Partner Name", "Category", "Source",
             "Days OOS (days with events)", "OOS Span (calendar days)", "OOS Views",
             "Back In Stock For (days)",
         ])
         for i in items:
             writer.writerow([
                 i["product_code"], i["product_name"] or "",
-                i["partner_code"] or "", i["category"] or "",
+                i["partner_code"] or "", i.get("partner_name") or "", i["category"] or "",
                 source_labels.get(i["source_type"], i["source_type"] or ""),
                 i["days_oos"], i["oos_span_days"], i["oos_views"],
                 i["days_since_last_oos"] if i["days_since_last_oos"] is not None else "",
@@ -1317,13 +1337,13 @@ def api_export(
         items, _ = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
         # Column order mirrors the dashboard table exactly.
         writer.writerow([
-            "Product Code", "Product Name", "Partner Code", "Category",
+            "Product Code", "Product Name", "Partner Code", "Partner Name", "Category",
             "Source", "OOS Views", "Days OOS", "OOS Span (calendar days)",
         ])
         for i in items:
             writer.writerow([
                 i["product_code"], i["product_name"] or "",
-                i["partner_code"] or "", i["category"] or "",
+                i["partner_code"] or "", i.get("partner_name") or "", i["category"] or "",
                 source_labels.get(i["source_type"], i["source_type"] or ""),
                 i["oos_views"], i["days_oos"], i["oos_span_days"],
             ])
@@ -1432,6 +1452,8 @@ def warm_cache() -> None:
         api_partners()
         matching_codes("zzzz")
         _active_rollup(start, end, None, None, None, None)
+        _recovered_rollup(None, None, None, None, None, None)
+        api_tab_counts(start=start, end=end, need="both")
     except Exception:
         pass
 
