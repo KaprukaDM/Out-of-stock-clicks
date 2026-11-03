@@ -773,6 +773,28 @@ def fetch_filtered_products(
     return items, meta
 
 
+def matching_codes(q: str) -> set[str]:
+    """Product codes whose code or name contains `q` (case-insensitive).
+
+    Search used to push `LIKE '%q%'` into every rollup, which defeats the
+    index and re-ran the full multi-second scan for every keystroke-distinct
+    query. Instead the (code, name) list is read once per data version and
+    the substring match runs in memory; the rollups are then filtered from
+    their cached no-search results.
+    """
+    ql = q.lower()
+    idx_key = ("product_index", _data_version)
+    index = cache_get(idx_key)
+    if index is _MISS:
+        con = db()
+        rows = con.execute(
+            "SELECT product_code, MAX(product_name) n FROM oos_daily GROUP BY product_code"
+        ).fetchall()
+        con.close()
+        index = cache_put(idx_key, [(r["product_code"], (r["n"] or "").lower()) for r in rows], rows=len(rows))
+    return {c for c, n in index if ql in c.lower() or ql in n}
+
+
 def _active_rollup(
     start: str | None, end: str | None, category: str | None, partner: str | None,
     source: str | None, q: str | None,
@@ -788,6 +810,14 @@ def _active_rollup(
     hit = cache_get(key)
     if hit is not _MISS:
         return hit[0], hit[1], True
+
+    if q:
+        base_items, base_meta, base_hit = _active_rollup(start, end, category, partner, source, None)
+        m = matching_codes(q)
+        items = [i for i in base_items if i["product_code"] in m]
+        meta = {**base_meta, "hidden_stale": 0, "matched_before_gate": len(items)}
+        cache_put(key, (items, meta), rows=len(items))
+        return items, meta, False
 
     con = db()
     query = """SELECT product_code, MAX(product_name) product_name,
@@ -949,6 +979,14 @@ def _recovered_rollup(
     hit = cache_get(key)
     if hit is not _MISS:
         return hit[0], hit[1], True
+
+    if q:
+        base_items, base_meta, base_hit = _recovered_rollup(category, partner, source, None, oos_start, oos_end)
+        m = matching_codes(q)
+        items = [i for i in base_items if i["product_code"] in m]
+        meta = {**base_meta, "recovered": len(items)}
+        cache_put(key, (items, meta), rows=len(items))
+        return items, meta, False
 
     con = db()
     # Window predicate, repeated inside each aggregate. Empty when no range is
@@ -1114,9 +1152,6 @@ def api_tab_counts(
         if source:
             sql += " AND source_type = ?"
             params.append(source)
-        if q:
-            sql += " AND (product_code LIKE ? OR product_name LIKE ?)"
-            params.extend([f"%{q}%", f"%{q}%"])
         return sql, params
 
     shared_sql, shared_params = filter_sql()
@@ -1133,6 +1168,8 @@ def api_tab_counts(
         if hit is not _MISS:
             out["active"] = hit
         else:
+            set_key = ("count_active_set", _data_version, start, end, category, partner, source)
+            in_range = cache_get(set_key)
             cached = False
             sql = "SELECT DISTINCT product_code FROM oos_daily INDEXED BY idx_oos_rollup WHERE oos_views > 0"
             params: list = []
@@ -1144,8 +1181,9 @@ def api_tab_counts(
                 params.append(end)
             sql += shared_sql
             params += shared_params
-            in_range = {r["product_code"] for r in con.execute(sql, params).fetchall()}
-            out["active"] = cache_put(key, len(in_range & active))
+            if in_range is _MISS:
+                in_range = cache_put(set_key, {r["product_code"] for r in con.execute(sql, params).fetchall()}, rows=1000)
+            out["active"] = cache_put(key, len(in_range & active & (matching_codes(q) if q else in_range)))
 
     if need in ("both", "recovered"):
         # Back-in-stock tab: codes out of stock at some point inside that tab's
@@ -1171,7 +1209,12 @@ def api_tab_counts(
                 rec_params.append(oos_end)
             rec_sql += shared_sql
             rec_params += shared_params
-            ever = {r["product_code"] for r in con.execute(rec_sql, rec_params).fetchall()}
+            set_key = ("count_ever_set", _data_version, oos_start, oos_end, category, partner, source)
+            ever = cache_get(set_key)
+            if ever is _MISS:
+                ever = cache_put(set_key, {r["product_code"] for r in con.execute(rec_sql, rec_params).fetchall()}, rows=1000)
+            if q:
+                ever = ever & matching_codes(q)
             out["recovered"] = cache_put(key, len(ever - active))
         out["oos_start"] = oos_start
         out["oos_end"] = oos_end
@@ -1383,6 +1426,7 @@ def warm_cache() -> None:
         api_status()
         api_categories()
         api_partners()
+        matching_codes("zzzz")
         _active_rollup(start, end, None, None, None, None)
     except Exception:
         pass
