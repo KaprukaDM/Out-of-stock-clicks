@@ -524,3 +524,25 @@ tbody tr:last-child td { border-bottom: none; }
 #revTable th:nth-child(4), #revTable td:nth-child(4) { width: 100px; }
 #revTable th:nth-child(5), #revTable td:nth-child(5) { width: 130px; }
 .rev-chip { text-transform: none; }
+
+/* Product / vendor names wrap instead of being cut off with an ellipsis. */
+#revTable { min-width: 1280px; }
+#revTable th:nth-child(1), #revTable td:nth-child(1) { width: 170px; }
+#revTable th:nth-child(2), #revTable td:nth-child(2) { width: 230px; }
+#revTable th:nth-child(3), #revTable td:nth-child(3) { width: 210px; }
+#revTable th:nth-child(4), #revTable td:nth-child(4) { width: 110px; }
+#revTable th:nth-child(5), #revTable td:nth-child(5) { width: 80px; }
+#revTable th:nth-child(6), #revTable td:nth-child(6),
+#revTable th:nth-child(7), #revTable td:nth-child(7) { width: 80px; }
+#revTable th:nth-child(8), #revTable td:nth-child(8) { width: 90px; }
+#revTable th:nth-child(9), #revTable td:nth-child(9) { width: 80px; }
+#revTable th:nth-child(10), #revTable td:nth-child(10) { width: 120px; }
+#revTable tbody td:nth-child(1), #revTable tbody td:nth-child(2), #revTable tbody td:nth-child(3),
+#revVendorTable tbody td:first-child { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+#revVendorTable td:first-child { max-width: none; }
+.rev-list-head select { font-family: inherit; font-size: 13px; padding: 7px 10px; max-width: 200px; }
+.rev-list-head input[type="text"] { width: 220px; }
+
+/* Vendor chart: wider label column that wraps rather than truncating. */
+#revVendorChart .rev-bar-row { grid-template-columns: 170px 1fr 76px; align-items: center; }
+#revVendorChart .rev-bar-label { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.25; font-size: 12.5px; overflow-wrap: anywhere; }

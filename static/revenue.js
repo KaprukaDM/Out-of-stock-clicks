@@ -11,7 +11,7 @@
 
   const files = { 1: null, 2: null };   // { name, map: Map<code,{name,vendor,qty,rev}>, total, hasRev, ... }
   const st = {
-    data: null, vendor: '', q: '',
+    data: null, vendor: '', category: '', q: '',
     sort: 'lost', dir: 'desc', offset: 0,
     vSort: 'lost', vDir: 'desc',
   };
@@ -253,7 +253,8 @@
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
       st.data = await res.json();
-      st.vendor = ''; st.q = ''; st.offset = 0; st.sort = 'lost'; st.dir = 'desc';
+      st.vendor = ''; st.category = ''; st.q = ''; st.offset = 0; st.sort = 'lost'; st.dir = 'desc';
+      fillFilters();
       $('revSearch').value = '';
       renderAll();
     } catch (e) {
@@ -333,15 +334,29 @@
 
   function setVendor(v) {
     st.vendor = st.vendor === v ? '' : v; st.offset = 0;
+    $('revVendorFilter').value = st.vendor;
     renderVendorTable(); renderList();
     if (st.vendor) $('revSearch').scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
+
+  // Category / vendor dropdowns list only what is in the current results.
+  function fillFilters() {
+    const fill = (sel, values, all) => {
+      sel.innerHTML = `<option value="">${all}</option>` + values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+    };
+    const uniq = (k) => [...new Set(st.data.items.map((i) => i[k]))].sort((a, b) => a.localeCompare(b));
+    fill($('revCatFilter'), uniq('category'), 'All categories');
+    fill($('revVendorFilter'), uniq('vendor'), 'All vendors');
+  }
+  $('revCatFilter').addEventListener('change', (e) => { st.category = e.target.value; st.offset = 0; renderList(); });
+  $('revVendorFilter').addEventListener('change', (e) => { st.vendor = e.target.value; st.offset = 0; renderVendorTable(); renderList(); });
 
   function filtered() {
     const q = st.q.toLowerCase();
     return st.data.items.filter((i) =>
       (!st.vendor || i.vendor === st.vendor) &&
-      (!q || i.product_code.toLowerCase().includes(q) || (i.product_name || '').toLowerCase().includes(q) || i.vendor.toLowerCase().includes(q)));
+      (!st.category || i.category === st.category) &&
+      (!q || i.product_code.toLowerCase().includes(q) || (i.product_name || '').toLowerCase().includes(q)));
   }
 
   function sorted(list) {
@@ -353,21 +368,22 @@
   }
 
   function renderList() {
-    const chip = $('revVendorChip');
-    chip.hidden = !st.vendor;
-    chip.innerHTML = st.vendor ? `Vendor: <strong>${esc(st.vendor)}</strong> ✕` : '';
-
     const list = sorted(filtered());
     const page = list.slice(st.offset, st.offset + PAGE);
     $('revBody').innerHTML = page.length ? page.map((i) => `
       <tr>
         <td class="pc-code">${esc(i.product_code)}</td>
-        <td title="${esc(i.product_name || '')}">${esc(i.product_name || '—')}</td>
-        <td title="${esc(i.vendor)}">${esc(i.vendor)}</td>
+        <td>${esc(i.product_name || '—')}</td>
+        <td>${esc(i.vendor)}</td>
+        <td><span class="category-badge">${esc(i.category)}</span></td>
         <td class="num"><span class="oos-days-badge">${i.oos_days}d</span></td>
+        <td class="num">${fmt(i.m1)}</td>
+        <td class="num">${fmt(i.m2)}</td>
+        <td class="num ${i.qty_drop > 0 ? 'loss' : ''}">${i.qty_drop > 0 ? '−' : i.qty_drop < 0 ? '+' : ''}${fmt(Math.abs(i.qty_drop))}</td>
+        <td class="num">${i.qty_drop_pct == null ? '—' : (i.qty_drop_pct > 0 ? '−' : '+') + Math.abs(i.qty_drop_pct) + '%'}</td>
         <td class="num loss">${fmt(i.lost)}</td>
       </tr>`).join('')
-      : '<tr><td colspan="5" class="empty-state">No products went out of stock with lost sales for these settings.</td></tr>';
+      : '<tr><td colspan="10" class="empty-state">No products went out of stock with lost sales for these settings.</td></tr>';
     sortMarks('revTable', st.sort, st.dir);
 
     const total = list.length, end = Math.min(st.offset + PAGE, total);
@@ -396,7 +412,6 @@
     if (st.vSort === k) st.vDir = st.vDir === 'asc' ? 'desc' : 'asc'; else { st.vSort = k; st.vDir = 'desc'; }
     renderVendorTable();
   }));
-  $('revVendorChip').addEventListener('click', () => setVendor(st.vendor));
   let deb; $('revSearch').addEventListener('input', (e) => { clearTimeout(deb); deb = setTimeout(() => { st.q = e.target.value.trim(); st.offset = 0; renderList(); }, 250); });
 
   // Client-side CSV of exactly the rows the current filters select. Carries a
@@ -404,13 +419,13 @@
   $('revExport').addEventListener('click', () => {
     if (!st.data) return;
     const hasRev = st.data.has_revenue;
-    const head = ['Product Code', 'Product Name', 'Vendor', 'Days OOS', hasRev ? 'Revenue Lost' : 'Units Lost',
-      'Month 1 Qty', 'Month 2 Qty', ...(hasRev ? ['Month 1 Revenue', 'Month 2 Revenue'] : []), 'Drop %', 'OOS Views', 'First OOS', 'Last OOS'];
+    const head = ['Product Code', 'Product Name', 'Vendor', 'Category', 'Days OOS', hasRev ? 'Revenue Lost' : 'Units Lost',
+      'Month 1 Qty', 'Month 2 Qty', 'Qty Drop', 'Qty Drop %', ...(hasRev ? ['Month 1 Revenue', 'Month 2 Revenue'] : []), 'OOS Views', 'First OOS', 'Last OOS'];
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const lines = [head.map(q).join(',')];
     sorted(filtered()).forEach((i) => {
-      lines.push([i.product_code, i.product_name, i.vendor, i.oos_days, i.lost, i.m1, i.m2,
-        ...(hasRev ? [i.r1, i.r2] : []), i.drop_pct, i.oos_views, i.first_oos, i.last_oos].map(q).join(','));
+      lines.push([i.product_code, i.product_name, i.vendor, i.category, i.oos_days, i.lost, i.m1, i.m2, i.qty_drop, i.qty_drop_pct,
+        ...(hasRev ? [i.r1, i.r2] : []), i.oos_views, i.first_oos, i.last_oos].map(q).join(','));
     });
     download(new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }),
       `kapruka-revenue-loss-${st.data.window.start}_${st.data.window.end}.csv`);

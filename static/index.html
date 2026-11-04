@@ -246,8 +246,9 @@
 
         <div class="rev-list-head">
           <h3>Products out of stock with lost revenue</h3>
-          <span class="rev-chip" id="revVendorChip" hidden></span>
-          <input type="text" id="revSearch" placeholder="Search code, name or vendor…">
+          <select id="revCatFilter" title="Category (from the product code)"><option value="">All categories</option></select>
+          <select id="revVendorFilter" title="Vendor"><option value="">All vendors</option></select>
+          <input type="text" id="revSearch" placeholder="Search product code or name…">
           <button class="btn btn-secondary" id="revExport">⬇ Export to Excel</button>
         </div>
         <div class="table-wrap">
@@ -256,7 +257,12 @@
               <th class="sortable" data-sort="product_code">Product Code</th>
               <th class="sortable" data-sort="product_name">Product Name</th>
               <th class="sortable" data-sort="vendor">Vendor</th>
+              <th class="sortable" data-sort="category">Category</th>
               <th class="sortable" data-sort="oos_days" title="Days in the OOS date range with at least one out_of_stock_view">Days OOS</th>
+              <th class="sortable" data-sort="m1" title="Quantity sold in Month 1">Qty M1</th>
+              <th class="sortable" data-sort="m2" title="Quantity sold in Month 2">Qty M2</th>
+              <th class="sortable" data-sort="qty_drop" title="Quantity drop, Month 1 to Month 2">Qty Drop</th>
+              <th class="sortable" data-sort="qty_drop_pct">Drop %</th>
               <th class="sortable" data-sort="lost" title="Month 1 total selling price minus Month 2">Revenue Lost</th>
             </tr></thead>
             <tbody id="revBody"></tbody>
