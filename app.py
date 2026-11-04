@@ -1638,7 +1638,15 @@ async def api_revenue_loss(req: RevenueLossRequest):
 # ------------------------------------------------------------------ static
 @app.get("/")
 async def index():
-    return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"), headers={"Cache-Control": "no-cache"})
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    # revenue.js is served by the /static mount, which sets no Cache-Control, so
+    # Cloudflare caches it for hours. A hand-bumped ?v=N went stale once (new
+    # page + cached old script = a crashed upload box), so stamp the URL with
+    # the file's mtime instead: a new deploy always means a new URL.
+    rev = STATIC / "revenue.js"
+    if rev.exists():
+        html = re.sub(r"static/revenue\.js\?v=\w+", f"static/revenue.js?v={int(rev.stat().st_mtime)}", html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
