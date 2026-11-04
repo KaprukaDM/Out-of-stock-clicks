@@ -11,9 +11,8 @@
 
   const files = { 1: null, 2: null };   // { name, map: Map<code,{name,vendor,qty,rev}>, total, hasRev, ... }
   const st = {
-    data: null, vendor: '', category: '', q: '',
+    data: null, vendor: '', category: '', q: '', topMetric: 'lost',
     sort: 'lost', dir: 'desc', offset: 0,
-    vSort: 'lost', vDir: 'desc',
   };
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -266,16 +265,6 @@
   }
 
   // ───────────── render
-  function vendors() {
-    const m = new Map();
-    for (const i of st.data.items) {
-      const v = m.get(i.vendor) || { vendor: i.vendor, products: 0, oos_days: 0, lost: 0 };
-      v.products++; v.oos_days += i.oos_days; v.lost += i.lost;
-      m.set(i.vendor, v);
-    }
-    return [...m.values()];
-  }
-
   function renderAll() {
     const d = st.data, t = d.totals;
     $('revResults').hidden = false;
@@ -300,44 +289,39 @@
       kpi('With lost sales', fmt(t.with_loss), 'OOS and sold less than Month 1', 'accent') +
       kpi(d.has_revenue ? 'Revenue lost' : 'Units lost', fmt(t.lost), `${pct(t.lost, t.ranked_base1)} of their Month 1 ${d.has_revenue ? 'revenue' : 'units'}`, 'danger');
 
-    renderVendorChart(); renderVendorTable(); renderList();
+    renderTop(); renderList();
   }
 
-  function renderVendorChart() {
-    const vs = vendors().sort((a, b) => b.lost - a.lost).slice(0, 12);
-    const max = Math.max(1, ...vs.map((v) => v.lost));
-    $('revVendorChart').innerHTML = vs.length ? vs.map((v) => `
-      <div class="rev-bar-row" data-vendor="${esc(v.vendor)}" title="${esc(v.vendor)}: ${fmt(v.lost)} lost across ${v.products} product${v.products === 1 ? '' : 's'}">
-        <span class="rev-bar-label">${esc(v.vendor)}</span>
-        <span class="rev-bar-track"><i class="seg-oos" style="width:${v.lost / max * 100}%"></i></span>
-        <span class="rev-bar-val">${fmt(v.lost)}</span>
-      </div>`).join('') : '<div class="empty-state">No out-of-stock products with lost sales found.</div>';
-    $('revVendorChart').querySelectorAll('.rev-bar-row').forEach((r) => r.addEventListener('click', () => setVendor(r.dataset.vendor)));
+  // Top-products panel: the biggest losers by the chosen metric, taken from
+  // whatever the category / vendor / search filters currently select.
+  function topProducts() {
+    const k = st.topMetric;
+    return filtered().sort((a, b) => b[k] - a[k]);
   }
-
-  function renderVendorTable() {
-    const k = st.vSort, dir = st.vDir === 'asc' ? 1 : -1;
-    const vs = vendors().sort((a, b) => {
-      const x = a[k], y = b[k];
-      return (typeof x === 'string' ? x.localeCompare(y) : x - y) * dir;
-    });
-    $('revVendorBody').innerHTML = vs.map((v) => `
-      <tr data-vendor="${esc(v.vendor)}" class="${st.vendor === v.vendor ? 'sel' : ''}">
-        <td title="${esc(v.vendor)}">${esc(v.vendor)}</td>
-        <td class="num">${fmt(v.products)}</td>
-        <td class="num">${fmt(v.oos_days)}</td>
-        <td class="num days-oos-strong">${fmt(v.lost)}</td>
-      </tr>`).join('') || '<tr><td colspan="4" class="empty-state">Nothing to show.</td></tr>';
-    $('revVendorBody').querySelectorAll('tr[data-vendor]').forEach((r) => r.addEventListener('click', () => setVendor(r.dataset.vendor)));
-    sortMarks('revVendorTable', st.vSort, st.vDir);
+  function renderTop() {
+    const k = st.topMetric;
+    const all = topProducts();
+    const chart = all.slice(0, 12);
+    const max = Math.max(1, ...chart.map((i) => i[k]));
+    $('revTopChart').innerHTML = chart.length ? chart.map((i) => `
+      <div class="rev-bar-row" data-code="${esc(i.product_code)}" title="${esc(i.product_code)} · ${esc(i.vendor)}">
+        <span class="rev-bar-label">${esc(i.product_name || i.product_code)}</span>
+        <span class="rev-bar-track"><i class="seg-oos" style="width:${Math.max(0, i[k]) / max * 100}%"></i></span>
+        <span class="rev-bar-val">${fmt(i[k])}</span>
+      </div>`).join('') : '<div class="empty-state">No products match.</div>';
+    $('revTopBody').innerHTML = all.slice(0, 25).map((i) => `
+      <tr data-code="${esc(i.product_code)}">
+        <td><div class="rev-prod-name">${esc(i.product_name || '—')}</div><div class="pc-code">${esc(i.product_code)}</div></td>
+        <td class="num loss">${fmt(i.lost)}</td>
+        <td class="num">${i.qty_drop > 0 ? '−' : ''}${fmt(Math.abs(i.qty_drop))}</td>
+        <td class="num">${i.qty_drop_pct == null ? '—' : (i.qty_drop_pct > 0 ? '−' : '+') + Math.abs(i.qty_drop_pct) + '%'}</td>
+        <td class="num">${fmt(i.oos_views)}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="empty-state">Nothing to show.</td></tr>';
+    document.querySelectorAll('#revTopChart .rev-bar-row, #revTopBody tr[data-code]').forEach((r) => r.addEventListener('click', () => openTrend(r.dataset.code)));
+    document.querySelectorAll('#revTopSeg button').forEach((b) => b.classList.toggle('active', b.dataset.metric === k));
   }
-
-  function setVendor(v) {
-    st.vendor = st.vendor === v ? '' : v; st.offset = 0;
-    $('revVendorFilter').value = st.vendor;
-    renderVendorTable(); renderList();
-    if (st.vendor) $('revSearch').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
+  document.querySelectorAll('#revTopSeg button').forEach((b) => b.addEventListener('click', () => { st.topMetric = b.dataset.metric; renderTop(); }));
+  const refresh = () => { renderTop(); renderList(); };
 
   // Category / vendor dropdowns list only what is in the current results.
   function fillFilters() {
@@ -348,8 +332,8 @@
     fill($('revCatFilter'), uniq('category'), 'All categories');
     fill($('revVendorFilter'), uniq('vendor'), 'All vendors');
   }
-  $('revCatFilter').addEventListener('change', (e) => { st.category = e.target.value; st.offset = 0; renderList(); });
-  $('revVendorFilter').addEventListener('change', (e) => { st.vendor = e.target.value; st.offset = 0; renderVendorTable(); renderList(); });
+  $('revCatFilter').addEventListener('change', (e) => { st.category = e.target.value; st.offset = 0; refresh(); });
+  $('revVendorFilter').addEventListener('change', (e) => { st.vendor = e.target.value; st.offset = 0; refresh(); });
 
   function filtered() {
     const q = st.q.toLowerCase();
@@ -371,20 +355,22 @@
     const list = sorted(filtered());
     const page = list.slice(st.offset, st.offset + PAGE);
     $('revBody').innerHTML = page.length ? page.map((i) => `
-      <tr>
+      <tr data-code="${esc(i.product_code)}">
         <td class="pc-code">${esc(i.product_code)}</td>
         <td>${esc(i.product_name || '—')}</td>
         <td>${esc(i.vendor)}</td>
         <td><span class="category-badge">${esc(i.category)}</span></td>
         <td class="num"><span class="oos-days-badge">${i.oos_days}d</span></td>
+        <td class="num">${fmt(i.oos_views)}</td>
         <td class="num">${fmt(i.m1)}</td>
         <td class="num">${fmt(i.m2)}</td>
         <td class="num ${i.qty_drop > 0 ? 'loss' : ''}">${i.qty_drop > 0 ? '−' : i.qty_drop < 0 ? '+' : ''}${fmt(Math.abs(i.qty_drop))}</td>
         <td class="num">${i.qty_drop_pct == null ? '—' : (i.qty_drop_pct > 0 ? '−' : '+') + Math.abs(i.qty_drop_pct) + '%'}</td>
         <td class="num loss">${fmt(i.lost)}</td>
       </tr>`).join('')
-      : '<tr><td colspan="10" class="empty-state">No products went out of stock with lost sales for these settings.</td></tr>';
+      : '<tr><td colspan="11" class="empty-state">No products went out of stock with lost sales for these settings.</td></tr>';
     sortMarks('revTable', st.sort, st.dir);
+    $('revBody').querySelectorAll('tr[data-code]').forEach((r) => r.addEventListener('click', () => openTrend(r.dataset.code)));
 
     const total = list.length, end = Math.min(st.offset + PAGE, total);
     const pg = $('revPagination');
@@ -407,12 +393,7 @@
     if (st.sort === k) st.dir = st.dir === 'asc' ? 'desc' : 'asc'; else { st.sort = k; st.dir = 'desc'; }
     st.offset = 0; renderList();
   }));
-  $('revVendorTable').querySelectorAll('th.sortable').forEach((th) => th.addEventListener('click', () => {
-    const k = th.dataset.sort;
-    if (st.vSort === k) st.vDir = st.vDir === 'asc' ? 'desc' : 'asc'; else { st.vSort = k; st.vDir = 'desc'; }
-    renderVendorTable();
-  }));
-  let deb; $('revSearch').addEventListener('input', (e) => { clearTimeout(deb); deb = setTimeout(() => { st.q = e.target.value.trim(); st.offset = 0; renderList(); }, 250); });
+  let deb; $('revSearch').addEventListener('input', (e) => { clearTimeout(deb); deb = setTimeout(() => { st.q = e.target.value.trim(); st.offset = 0; refresh(); }, 250); });
 
   // Client-side CSV of exactly the rows the current filters select. Carries a
   // few extra columns beyond the on-screen five so the maths can be checked.

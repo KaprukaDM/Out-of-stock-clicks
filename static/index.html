@@ -225,27 +225,34 @@
 
         <div class="rev-grid">
           <div class="rev-panel">
-            <h3>Revenue lost by vendor <small>top 12</small></h3>
-            <div id="revVendorChart"></div>
+            <div class="rev-panel-head">
+              <h3>Top products <small>click one for its OOS trend</small></h3>
+              <div class="rev-seg" id="revTopSeg">
+                <button class="active" data-metric="lost">Revenue lost</button>
+                <button data-metric="qty_drop">Quantity drop</button>
+              </div>
+            </div>
+            <div id="revTopChart"></div>
           </div>
           <div class="rev-panel">
-            <h3>Vendor breakdown <small>click a row to filter the products below</small></h3>
+            <h3>Top products breakdown <small>top 25 · follows the filters below</small></h3>
             <div class="table-wrap rev-cat-wrap">
-              <table id="revVendorTable">
+              <table id="revTopTable">
                 <thead><tr>
-                  <th class="sortable" data-sort="vendor">Vendor</th>
-                  <th class="sortable" data-sort="products">Products</th>
-                  <th class="sortable" data-sort="oos_days">OOS days</th>
-                  <th class="sortable" data-sort="lost">Revenue lost</th>
+                  <th>Product</th>
+                  <th>Revenue Lost</th>
+                  <th>Qty Drop</th>
+                  <th>Drop %</th>
+                  <th>OOS Hits</th>
                 </tr></thead>
-                <tbody id="revVendorBody"></tbody>
+                <tbody id="revTopBody"></tbody>
               </table>
             </div>
           </div>
         </div>
 
         <div class="rev-list-head">
-          <h3>Products out of stock with lost revenue</h3>
+          <h3>Products out of stock with lost revenue <small class="muted-note">click a row for the OOS trend</small></h3>
           <select id="revCatFilter" title="Category (from the product code)"><option value="">All categories</option></select>
           <select id="revVendorFilter" title="Vendor"><option value="">All vendors</option></select>
           <input type="text" id="revSearch" placeholder="Search product code or name…">
@@ -259,6 +266,7 @@
               <th class="sortable" data-sort="vendor">Vendor</th>
               <th class="sortable" data-sort="category">Category</th>
               <th class="sortable" data-sort="oos_days" title="Days in the OOS date range with at least one out_of_stock_view">Days OOS</th>
+              <th class="sortable" data-sort="oos_views" title="Total out_of_stock_view events in the OOS date range">OOS Hits</th>
               <th class="sortable" data-sort="m1" title="Quantity sold in Month 1">Qty M1</th>
               <th class="sortable" data-sort="m2" title="Quantity sold in Month 2">Qty M2</th>
               <th class="sortable" data-sort="qty_drop" title="Quantity drop, Month 1 to Month 2">Qty Drop</th>
@@ -290,6 +298,6 @@
   </div>
 
   <script src="app.js?v=3"></script>
-  <script src="static/revenue.js?v=1"></script>
+  <script src="static/revenue.js?v=5"></script>
 </body>
 </html>

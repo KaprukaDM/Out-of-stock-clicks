@@ -546,3 +546,27 @@ tbody tr:last-child td { border-bottom: none; }
 /* Vendor chart: wider label column that wraps rather than truncating. */
 #revVendorChart .rev-bar-row { grid-template-columns: 170px 1fr 76px; align-items: center; }
 #revVendorChart .rev-bar-label { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.25; font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* Top-products panel + clickable rows + OOS Hits column (11 columns now). */
+.rev-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.rev-panel-head h3 { margin-bottom: 0; }
+#revTopTable { min-width: 0; }
+#revTopTable th, #revTopTable td { padding: 9px 10px; }
+#revTopTable th:first-child { width: 42%; }
+#revTopBody tr { cursor: pointer; }
+.rev-prod-name { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; font-weight: 500; }
+#revTopBody td:first-child { white-space: normal; }
+#revTopChart .rev-bar-row { grid-template-columns: 200px 1fr 76px; }
+#revTable { min-width: 1380px; }
+#revTable th:nth-child(1), #revTable td:nth-child(1) { width: 170px; }
+#revTable th:nth-child(2), #revTable td:nth-child(2) { width: 220px; }
+#revTable th:nth-child(3), #revTable td:nth-child(3) { width: 200px; }
+#revTable th:nth-child(4), #revTable td:nth-child(4) { width: 105px; }
+#revTable th:nth-child(5), #revTable td:nth-child(5) { width: 80px; }
+#revTable th:nth-child(6), #revTable td:nth-child(6) { width: 85px; }
+#revTable th:nth-child(7), #revTable td:nth-child(7), #revTable th:nth-child(8), #revTable td:nth-child(8) { width: 80px; }
+#revTable th:nth-child(9), #revTable td:nth-child(9) { width: 90px; }
+#revTable th:nth-child(10), #revTable td:nth-child(10) { width: 80px; }
+#revTable th:nth-child(11), #revTable td:nth-child(11) { width: 120px; }
+#revTable tbody tr { cursor: pointer; }
+#revTopChart .rev-bar-label { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.25; font-size: 12.5px; overflow-wrap: anywhere; }
