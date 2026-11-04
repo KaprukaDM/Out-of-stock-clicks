@@ -1,0 +1,4 @@
+{
+  "_note": "Product codes (or exact product names) to drop from the Revenue loss analysis completely. Case-insensitive. Edit and git pull; no restart needed.",
+  "codes": ["jp_gold_leaf_20_pack"]
+}

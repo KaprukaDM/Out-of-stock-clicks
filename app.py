@@ -1523,6 +1523,21 @@ class RevenueLossRequest(BaseModel):
     min_oos_days: int = 1
 
 
+EXCLUDED_FILE = ROOT / "excluded_products.json"
+
+
+def load_excluded_products() -> set[str]:
+    """Codes/names listed in excluded_products.json are dropped from the
+    revenue analysis entirely (not ranked, not counted, not exported). Read per
+    request so a git pull takes effect without a restart."""
+    try:
+        import json
+        data = json.loads(EXCLUDED_FILE.read_text(encoding="utf-8"))
+        return {str(c).strip().lower() for c in data.get("codes", []) if str(c).strip()}
+    except (OSError, ValueError):
+        return set()
+
+
 @app.post("/api/revenue-loss")
 async def api_revenue_loss(req: RevenueLossRequest):
     from datetime import date
@@ -1534,11 +1549,14 @@ async def api_revenue_loss(req: RevenueLossRequest):
     min_oos_days = max(1, req.min_oos_days)
 
     # The same code can repeat in an extract - sum it, keep the first name/vendor.
+    excluded = load_excluded_products()
     merged: dict[str, dict] = {}
     has_rev = False
     for r in req.rows:
         code = r.code.strip()
         if not code:
+            continue
+        if code.lower() in excluded or (r.name or "").strip().lower() in excluded:
             continue
         m = merged.setdefault(code, {"name": None, "vendor": None, "m1": 0.0, "m2": 0.0, "r1": 0.0, "r2": 0.0})
         m["m1"] += r.m1
@@ -1637,6 +1655,9 @@ async def index():
     rev = STATIC / "revenue.js"
     if rev.exists():
         html = re.sub(r"static/revenue\.js\?v=\w+", f"static/revenue.js?v={int(rev.stat().st_mtime)}", html)
+    css = STATIC / "style.css"
+    if css.exists():
+        html = re.sub(r"style\.css\?v=\w+", f"style.css?v={int(css.stat().st_mtime)}", html)
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
@@ -1650,4 +1671,4 @@ async def app_js():
 
 @app.get("/style.css")
 async def style_css():
-    return Response((STATIC / "style.css").read_text(encoding="utf-8"), media_type="text/css")
+    return Response((STATIC / "style.css").read_text(encoding="utf-8"), media_type="text/css", headers={"Cache-Control": "no-cache"})
