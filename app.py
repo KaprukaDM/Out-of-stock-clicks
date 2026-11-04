@@ -1490,33 +1490,39 @@ async def api_cache_clear():
 
 
 # ------------------------------------------------------------------ revenue loss
-# Third tab. The user uploads two monthly sales extracts (product code, total
-# quantity sold) and we answer: of the products whose quantity fell from month
-# 1 to month 2, which ones were also going out of stock in month 2? The OOS
-# evidence is the same GA4 out_of_stock_view data the other tabs use, counted
-# over month 2's calendar window only - NOT gated by recency, because a product
-# that has since been restocked still lost sales while it was out.
+# Third tab. The user uploads two monthly sales extracts (Product Code, Product
+# Name, Vendor, Product Qty, Total Selling price) and we answer: of the
+# products that mattered in month 1 (top sellers, or biggest drop %), which
+# were out of stock for at least N days in month 2, and how much revenue did
+# that cost?
 #
-# The files are parsed in the browser (CSV/XLSX) and arrive here as JSON rows,
-# so this needs no multipart/openpyxl dependency. Nothing is stored.
+#   revenue lost = month-1 total selling price - month-2 total selling price
 #
-# "Lost" is the quantity drop itself, month 2 vs month 1. It is an upper bound
-# on what OOS cost: a product can fall for other reasons and also be OOS for a
-# few hours, so every row carries its OOS days/views as evidence and the UI
-# lets the user raise min_oos_days to tighten the match. Revenue only exists if
-# the upload has a unit price column; otherwise units are the loss measure.
+# (qty drop if the files carry no revenue column). Only positive losses are
+# listed. The OOS evidence is the GA4 out_of_stock_view data over the chosen
+# date range and is NOT recency-gated: a product restocked since then still
+# lost sales while it was out. It is an upper bound on what OOS cost - a
+# product can fall for other reasons and also be OOS briefly - so the days
+# out of stock are shown beside every figure.
+#
+# Files are parsed in the browser and arrive as JSON rows, so no multipart or
+# openpyxl dependency. Nothing is stored.
 class RevRow(BaseModel):
     code: str
+    name: str | None = None
+    vendor: str | None = None
     m1: float = 0
     m2: float = 0
-    price: float | None = None
+    r1: float | None = None
+    r2: float | None = None
 
 
 class RevenueLossRequest(BaseModel):
     rows: list[RevRow]
     oos_start: str
     oos_end: str
-    min_drop_pct: float = 0
+    rank_by: str = "top_selling"   # or "top_drop"
+    top_n: int = 500          # 0 = every product
     min_oos_days: int = 1
 
 
@@ -1525,28 +1531,49 @@ async def api_revenue_loss(req: RevenueLossRequest):
     from datetime import date
     oos_start, oos_end = validate_window(req.oos_start, req.oos_end)
     if not oos_start or not oos_end:
-        raise HTTPException(status_code=400, detail="month 2 window (oos_start and oos_end) is required")
+        raise HTTPException(status_code=400, detail="OOS date range (oos_start and oos_end) is required")
     if len(req.rows) > 300_000:
         raise HTTPException(status_code=400, detail="too many rows (max 300,000)")
-    min_drop_pct = max(0.0, req.min_drop_pct)
+    if req.rank_by not in ("top_selling", "top_drop"):
+        raise HTTPException(status_code=400, detail="rank_by must be top_selling or top_drop")
     min_oos_days = max(1, req.min_oos_days)
 
-    # Same code may repeat in an extract (one line per variant/day) - sum them.
+    # The same code can repeat in an extract - sum it, keep the first name/vendor.
     merged: dict[str, dict] = {}
+    has_rev = False
     for r in req.rows:
         code = r.code.strip()
         if not code:
             continue
-        m = merged.setdefault(code, {"m1": 0.0, "m2": 0.0, "price": None})
+        m = merged.setdefault(code, {"name": None, "vendor": None, "m1": 0.0, "m2": 0.0, "r1": 0.0, "r2": 0.0})
         m["m1"] += r.m1
         m["m2"] += r.m2
-        if r.price and r.price > 0:
-            m["price"] = r.price
+        if r.r1 is not None or r.r2 is not None:
+            has_rev = True
+            m["r1"] += r.r1 or 0
+            m["r2"] += r.r2 or 0
+        m["name"] = m["name"] or (r.name or "").strip() or None
+        m["vendor"] = m["vendor"] or (r.vendor or "").strip() or None
 
-    # OOS evidence inside month 2, chunked to stay under SQLite's variable cap.
+    # Rank the month-1 universe, take the top N, THEN check OOS - so "top
+    # sellers that went out of stock", not "the top sellers among OOS products".
+    cand = []
+    for code, m in merged.items():
+        base1, base2 = (m["r1"], m["r2"]) if has_rev else (m["m1"], m["m2"])
+        if base1 <= 0:
+            continue
+        lost = base1 - base2
+        drop_pct = lost / base1 * 100
+        if req.rank_by == "top_drop" and lost <= 0:
+            continue
+        cand.append((code, m, base1, base2, lost, drop_pct))
+    cand.sort(key=lambda c: -(c[2] if req.rank_by == "top_selling" else c[5]))
+    if req.top_n > 0:
+        cand = cand[:req.top_n]
+
     con = db()
     evidence: dict[str, sqlite3.Row] = {}
-    codes = list(merged)
+    codes = [c[0] for c in cand]
     for i in range(0, len(codes), 500):
         chunk = codes[i:i + 500]
         marks = ",".join("?" * len(chunk))
@@ -1564,79 +1591,47 @@ async def api_revenue_loss(req: RevenueLossRequest):
 
     window_days = (date.fromisoformat(oos_end) - date.fromisoformat(oos_start)).days + 1
     data_lo, data_hi = cov["lo"], cov["hi"]
-    # How much of month 2 the synced GA4 data actually spans - OOS evidence
-    # outside that is simply absent, which would read as "never out of stock".
+    # How much of the range the synced GA4 data spans - OOS evidence outside it
+    # is simply absent, which would read as "never out of stock".
     if data_lo and data_hi:
-        lo = max(oos_start, data_lo)
-        hi = min(oos_end, data_hi)
+        lo, hi = max(oos_start, data_lo), min(oos_end, data_hi)
         covered_days = max(0, (date.fromisoformat(hi) - date.fromisoformat(lo)).days + 1)
     else:
         covered_days = 0
 
     items = []
-    cats: dict[str, dict] = {}
-    totals = {"products": len(merged), "dropped": 0, "oos_linked": 0, "other_drops": 0,
-              "units_m1": 0.0, "units_m2": 0.0, "units_lost_oos": 0.0, "units_lost_other": 0.0,
-              "revenue_lost_oos": 0.0, "revenue_lost_other": 0.0, "has_price": False}
-    for code, m in merged.items():
-        cat = extract_category(code) or "other"
-        c = cats.setdefault(cat, {"category": cat, "products": 0, "dropped": 0, "oos_linked": 0,
-                                  "units_m1": 0.0, "units_m2": 0.0, "units_lost_oos": 0.0,
-                                  "units_lost_other": 0.0, "revenue_lost_oos": 0.0})
-        c["products"] += 1
-        c["units_m1"] += m["m1"]
-        c["units_m2"] += m["m2"]
-        totals["units_m1"] += m["m1"]
-        totals["units_m2"] += m["m2"]
-
-        drop = m["m1"] - m["m2"]
-        drop_pct = (drop / m["m1"] * 100) if m["m1"] > 0 else 0.0
-        if drop <= 0 or drop_pct < min_drop_pct:
-            continue
+    went_oos = 0
+    ranked_base1 = sum(c[2] for c in cand)
+    for code, m, base1, base2, lost, drop_pct in cand:
         ev = evidence.get(code)
         oos_days = ev["oos_days"] if ev else 0
-        linked = oos_days >= min_oos_days
-        price = m["price"]
-        revenue = drop * price if price else None
-        if price:
-            totals["has_price"] = True
-        c["dropped"] += 1
-        totals["dropped"] += 1
-        if linked:
-            c["oos_linked"] += 1
-            c["units_lost_oos"] += drop
-            totals["oos_linked"] += 1
-            totals["units_lost_oos"] += drop
-            if revenue:
-                c["revenue_lost_oos"] += revenue
-                totals["revenue_lost_oos"] += revenue
-        else:
-            c["units_lost_other"] += drop
-            totals["other_drops"] += 1
-            totals["units_lost_other"] += drop
-            if revenue:
-                totals["revenue_lost_other"] += revenue
+        if oos_days < min_oos_days:
+            continue
+        went_oos += 1
+        if lost <= 0:
+            continue    # went out of stock but sold as much or more - no loss
         items.append({
             "product_code": code,
-            "product_name": ev["product_name"] if ev else None,
-            "category": cat,
-            "m1": m["m1"], "m2": m["m2"], "drop": drop, "drop_pct": round(drop_pct, 1),
-            "price": price, "revenue_lost": revenue,
-            "oos_linked": linked,
+            "product_name": m["name"] or (ev["product_name"] if ev else None),
+            "vendor": m["vendor"] or "Unknown",
             "oos_days": oos_days,
             "oos_views": ev["oos_views"] if ev else 0,
-            "oos_day_share": round(oos_days / window_days * 100) if window_days else 0,
+            "lost": lost,
+            "drop_pct": round(drop_pct, 1),
+            "m1": m["m1"], "m2": m["m2"], "r1": m["r1"] if has_rev else None, "r2": m["r2"] if has_rev else None,
             "first_oos": ev["first_oos"] if ev else None,
             "last_oos": ev["last_oos"] if ev else None,
         })
-
-    categories = sorted(cats.values(), key=lambda c: (-c["units_lost_oos"], c["category"]))
-    items.sort(key=lambda i: (not i["oos_linked"], -(i["revenue_lost"] or i["drop"])))
+    items.sort(key=lambda i: -i["lost"])
     return {
         "window": {"start": oos_start, "end": oos_end, "days": window_days,
                    "data_from": data_lo, "data_to": data_hi, "covered_days": covered_days},
-        "params": {"min_drop_pct": min_drop_pct, "min_oos_days": min_oos_days},
-        "totals": totals, "categories": categories, "items": items,
+        "params": {"rank_by": req.rank_by, "top_n": req.top_n, "min_oos_days": min_oos_days},
+        "has_revenue": has_rev,
+        "totals": {"uploaded": len(merged), "ranked": len(cand), "went_oos": went_oos,
+                   "with_loss": len(items), "lost": sum(i["lost"] for i in items),
+                   "ranked_base1": ranked_base1},
+        "items": items,
     }
 
 

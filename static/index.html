@@ -166,7 +166,7 @@
          out-of-stock data. Logic lives in static/revenue.js. -->
     <section id="revPanel" hidden>
       <div class="rev-format">
-        <span><strong>Upload format:</strong> one row per product, columns <code>Product Code</code>, <code>Quantity</code> (month total) and optionally <code>Unit Price</code> for revenue figures. CSV or Excel, same layout for both months.</span>
+        <span><strong>Upload format</strong> (same layout for both months, CSV or Excel): <code>Product Code</code>, <code>Product Name</code>, <code>Vendor</code>, <code>Product Qty</code>, <code>Total Selling price</code></span>
         <span class="rev-format-actions">
           <button class="btn btn-secondary" id="tplCsv" type="button">⬇ CSV template</button>
           <button class="btn btn-secondary" id="tplXlsx" type="button">⬇ Excel template</button>
@@ -179,7 +179,7 @@
             <input type="file" id="file1" accept=".csv,.xlsx,.xls" hidden>
             <span class="rev-drop-icon">⬆</span>
             <span class="rev-drop-text"><strong>Drop file</strong> or click to browse</span>
-            <span class="rev-drop-hint">CSV / Excel · Product code, Quantity<span class="opt">, Unit price (optional)</span></span>
+            <span class="rev-drop-hint">CSV / Excel</span>
           </label>
           <div class="rev-file-info" id="info1" hidden></div>
         </div>
@@ -189,7 +189,7 @@
             <input type="file" id="file2" accept=".csv,.xlsx,.xls" hidden>
             <span class="rev-drop-icon">⬆</span>
             <span class="rev-drop-text"><strong>Drop file</strong> or click to browse</span>
-            <span class="rev-drop-hint">CSV / Excel · Product code, Quantity<span class="opt">, Unit price (optional)</span></span>
+            <span class="rev-drop-hint">CSV / Excel</span>
           </label>
           <div class="rev-file-info" id="info2" hidden></div>
         </div>
@@ -197,7 +197,7 @@
 
       <div class="toolbar rev-controls">
         <div class="filter-group">
-          <label title="Out-of-stock views are counted between these dates. Use the same period as your Month 2 file.">OOS date range</label>
+          <label title="Out-of-stock views are counted between these dates. Defaults to last month; use the same period as your Month 2 file.">OOS date range</label>
           <div class="date-inputs">
             <input type="date" id="revStart">
             <span>to</span>
@@ -205,7 +205,18 @@
           </div>
         </div>
         <div class="filter-group">
-          <label title="A product counts as OOS-linked only if it had out-of-stock views on at least this many days in month 2">Min OOS days</label>
+          <label title="Which Month 1 products to check for stock-outs">Pick from Month 1</label>
+          <select id="revRank">
+            <option value="top_selling">Top selling (by revenue)</option>
+            <option value="top_drop">Biggest drop %</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label title="How many Month 1 products to check. 0 = all.">Top N</label>
+          <input type="number" id="revTopN" value="500" min="0" step="50">
+        </div>
+        <div class="filter-group">
+          <label title="Counts only products out of stock on at least this many days in the date range">Min OOS days</label>
           <input type="number" id="revMinDays" value="1" min="1" max="31" step="1">
         </div>
         <div class="filter-group">
@@ -225,36 +236,29 @@
 
         <div class="rev-grid">
           <div class="rev-panel">
-            <h3>Loss by category <small>units lost on products that were out of stock in month 2</small></h3>
-            <div id="revCatChart"></div>
+            <h3>Revenue lost by vendor <small>top 12</small></h3>
+            <div id="revVendorChart"></div>
           </div>
           <div class="rev-panel">
-            <h3>Category breakdown <small>click a row to filter the products below</small></h3>
+            <h3>Vendor breakdown <small>click a row to filter the products below</small></h3>
             <div class="table-wrap rev-cat-wrap">
-              <table id="revCatTable">
+              <table id="revVendorTable">
                 <thead><tr>
-                  <th class="sortable" data-sort="category">Category</th>
+                  <th class="sortable" data-sort="vendor">Vendor</th>
                   <th class="sortable" data-sort="products">Products</th>
-                  <th class="sortable" data-sort="dropped">Dropped</th>
-                  <th class="sortable" data-sort="oos_linked">OOS-linked</th>
-                  <th class="sortable" data-sort="units_lost_oos">Units lost</th>
-                  <th class="sortable" data-sort="pct">% of M1</th>
-                  <th class="sortable rev-col-rev" data-sort="revenue_lost_oos">Revenue lost</th>
+                  <th class="sortable" data-sort="oos_days">OOS days</th>
+                  <th class="sortable" data-sort="lost">Revenue lost</th>
                 </tr></thead>
-                <tbody id="revCatBody"></tbody>
+                <tbody id="revVendorBody"></tbody>
               </table>
             </div>
           </div>
         </div>
 
         <div class="rev-list-head">
-          <h3>Products</h3>
-          <div class="rev-seg" id="revSeg">
-            <button class="active" data-mode="linked">OOS-linked drops <span id="segLinked"></span></button>
-            <button data-mode="other">Other drops <span id="segOther"></span></button>
-          </div>
-          <span class="rev-chip" id="revCatChip" hidden></span>
-          <input type="text" id="revSearch" placeholder="Search code or name…">
+          <h3>Products out of stock with lost revenue</h3>
+          <span class="rev-chip" id="revVendorChip" hidden></span>
+          <input type="text" id="revSearch" placeholder="Search code, name or vendor…">
           <button class="btn btn-secondary" id="revExport">⬇ Export to Excel</button>
         </div>
         <div class="table-wrap">
@@ -262,14 +266,9 @@
             <thead><tr>
               <th class="sortable" data-sort="product_code">Product Code</th>
               <th class="sortable" data-sort="product_name">Product Name</th>
-              <th class="sortable" data-sort="category">Category</th>
-              <th class="sortable" data-sort="m1">Month 1</th>
-              <th class="sortable" data-sort="m2">Month 2</th>
-              <th class="sortable" data-sort="drop">Drop</th>
-              <th class="sortable" data-sort="drop_pct">Drop %</th>
-              <th class="sortable" data-sort="oos_days" title="Days in month 2 with at least one out_of_stock_view">OOS days</th>
-              <th class="sortable" data-sort="oos_views">OOS views</th>
-              <th class="sortable rev-col-rev" data-sort="revenue_lost">Revenue lost</th>
+              <th class="sortable" data-sort="vendor">Vendor</th>
+              <th class="sortable" data-sort="oos_days" title="Days in the OOS date range with at least one out_of_stock_view">Days OOS</th>
+              <th class="sortable" data-sort="lost" title="Month 1 total selling price minus Month 2">Revenue Lost</th>
             </tr></thead>
             <tbody id="revBody"></tbody>
           </table>
