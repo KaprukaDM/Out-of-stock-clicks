@@ -184,15 +184,18 @@
   });
 
   // ───────────── controls
-  (function defaultMonth() {
-    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1);
-    $('revMonth2').value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  // Default OOS range: last calendar month.
+  (function defaultRange() {
+    const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const now = new Date();
+    $('revStart').value = iso(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+    $('revEnd').value = iso(new Date(now.getFullYear(), now.getMonth(), 0));
   })();
 
   function updateRunState() {
-    $('revRun').disabled = !(files[1] && files[2] && $('revMonth2').value);
+    $('revRun').disabled = !(files[1] && files[2] && $('revStart').value && $('revEnd').value);
   }
-  $('revMonth2').addEventListener('input', updateRunState);
+  ['revStart', 'revEnd'].forEach((id) => $(id).addEventListener('input', updateRunState));
 
   $('revReset').addEventListener('click', () => {
     files[1] = files[2] = null; st.data = null;
@@ -204,9 +207,6 @@
   $('revRun').addEventListener('click', run);
 
   async function run() {
-    const [y, m] = $('revMonth2').value.split('-').map(Number);
-    const last = new Date(y, m, 0).getDate();
-    const p2 = (n) => String(n).padStart(2, '0');
     const rows = [];
     const codes = new Set([...files[1].map.keys(), ...files[2].map.keys()]);
     for (const code of codes) {
@@ -219,8 +219,7 @@
       const res = await fetch('api/revenue-loss', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rows, oos_start: `${y}-${p2(m)}-01`, oos_end: `${y}-${p2(m)}-${p2(last)}`,
-          min_drop_pct: Number($('revMinDrop').value) || 0,
+          rows, oos_start: $('revStart').value, oos_end: $('revEnd').value,
           min_oos_days: Number($('revMinDays').value) || 1,
         }),
       });
@@ -256,10 +255,10 @@
       n.innerHTML = `⚠️ No GA4 out-of-stock data is synced for <strong>${d.window.start} → ${d.window.end}</strong>, so nothing can be marked OOS-linked. Backfill that month (see README: <code>POST /api/refresh?start=…&amp;end=…</code>) and run again.`;
     } else if (covered < days) {
       n.className = 'recency-note recency-stale';
-      n.innerHTML = `⚠️ Synced GA4 data covers only <strong>${covered} of ${days} days</strong> of the month (data ${d.window.data_from} → ${d.window.data_to}). Products that were out of stock on the missing days are not flagged, so OOS-linked loss is understated.`;
+      n.innerHTML = `⚠️ Synced GA4 data covers only <strong>${covered} of ${days} days</strong> of the selected range (data ${d.window.data_from} → ${d.window.data_to}). Products that were out of stock on the missing days are not flagged, so OOS-linked loss is understated.`;
     } else {
       n.className = 'recency-note';
-      n.innerHTML = `📅 OOS evidence counted over <strong>${d.window.start} → ${d.window.end}</strong> (${days} days, fully covered by synced data). Showing products that dropped ≥ <strong>${d.params.min_drop_pct}%</strong> and had out-of-stock views on ≥ <strong>${d.params.min_oos_days}</strong> day${d.params.min_oos_days === 1 ? '' : 's'}.`;
+      n.innerHTML = `📅 OOS evidence counted over <strong>${d.window.start} → ${d.window.end}</strong> (${days} day${days === 1 ? '' : 's'}, fully covered by synced data). Showing products whose quantity dropped and that had out-of-stock views on ≥ <strong>${d.params.min_oos_days}</strong> day${d.params.min_oos_days === 1 ? '' : 's'}.`;
     }
 
     const totalDrop = t.units_lost_oos + t.units_lost_other;
@@ -392,7 +391,7 @@
   $('revExport').addEventListener('click', () => {
     if (!st.data) return;
     const hasPrice = st.data.totals.has_price;
-    const head = ['Product Code', 'Product Name', 'Category', 'Month 1 Qty', 'Month 2 Qty', 'Qty Drop', 'Drop %', 'OOS Days (month 2)', 'OOS Views (month 2)', 'First OOS', 'Last OOS', 'OOS-linked'];
+    const head = ['Product Code', 'Product Name', 'Category', 'Month 1 Qty', 'Month 2 Qty', 'Qty Drop', 'Drop %', 'OOS Days', 'OOS Views', 'First OOS', 'Last OOS', 'OOS-linked'];
     if (hasPrice) head.push('Unit Price', 'Revenue Lost');
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const lines = [head.map(q).join(',')];
@@ -404,7 +403,7 @@
     const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `kapruka-revenue-loss-${st.data.window.start.slice(0, 7)}.csv`;
+    a.download = `kapruka-revenue-loss-${st.data.window.start}_${st.data.window.end}.csv`;
     a.click(); URL.revokeObjectURL(a.href);
   });
 })();

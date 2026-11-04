@@ -197,12 +197,12 @@
 
       <div class="toolbar rev-controls">
         <div class="filter-group">
-          <label title="OOS evidence is counted inside this calendar month">Month 2 (OOS window)</label>
-          <input type="month" id="revMonth2">
-        </div>
-        <div class="filter-group">
-          <label title="Ignore drops smaller than this share of month 1">Min drop %</label>
-          <input type="number" id="revMinDrop" value="10" min="0" max="100" step="5">
+          <label title="Out-of-stock views are counted between these dates. Use the same period as your Month 2 file.">OOS date range</label>
+          <div class="date-inputs">
+            <input type="date" id="revStart">
+            <span>to</span>
+            <input type="date" id="revEnd">
+          </div>
         </div>
         <div class="filter-group">
           <label title="A product counts as OOS-linked only if it had out-of-stock views on at least this many days in month 2">Min OOS days</label>
