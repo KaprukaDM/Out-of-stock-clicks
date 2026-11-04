@@ -1492,8 +1492,7 @@ async def api_cache_clear():
 # ------------------------------------------------------------------ revenue loss
 # Third tab. The user uploads two monthly sales extracts (Product Code, Product
 # Name, Vendor, Product Qty, Total Selling price) and we answer: of the
-# products that mattered in month 1 (top sellers, or biggest drop %), which
-# were out of stock for at least N days in month 2, and how much revenue did
+# products that sold in month 1, which were out of stock for at least N days in month 2, and how much revenue did
 # that cost?
 #
 #   revenue lost = month-1 total selling price - month-2 total selling price
@@ -1521,8 +1520,6 @@ class RevenueLossRequest(BaseModel):
     rows: list[RevRow]
     oos_start: str
     oos_end: str
-    rank_by: str = "top_selling"   # or "top_drop"
-    top_n: int = 500          # 0 = every product
     min_oos_days: int = 1
 
 
@@ -1534,8 +1531,6 @@ async def api_revenue_loss(req: RevenueLossRequest):
         raise HTTPException(status_code=400, detail="OOS date range (oos_start and oos_end) is required")
     if len(req.rows) > 300_000:
         raise HTTPException(status_code=400, detail="too many rows (max 300,000)")
-    if req.rank_by not in ("top_selling", "top_drop"):
-        raise HTTPException(status_code=400, detail="rank_by must be top_selling or top_drop")
     min_oos_days = max(1, req.min_oos_days)
 
     # The same code can repeat in an extract - sum it, keep the first name/vendor.
@@ -1555,21 +1550,14 @@ async def api_revenue_loss(req: RevenueLossRequest):
         m["name"] = m["name"] or (r.name or "").strip() or None
         m["vendor"] = m["vendor"] or (r.vendor or "").strip() or None
 
-    # Rank the month-1 universe, take the top N, THEN check OOS - so "top
-    # sellers that went out of stock", not "the top sellers among OOS products".
+    # Every product that sold in month 1 is "active" and gets checked for OOS.
     cand = []
     for code, m in merged.items():
         base1, base2 = (m["r1"], m["r2"]) if has_rev else (m["m1"], m["m2"])
         if base1 <= 0:
             continue
         lost = base1 - base2
-        drop_pct = lost / base1 * 100
-        if req.rank_by == "top_drop" and lost <= 0:
-            continue
-        cand.append((code, m, base1, base2, lost, drop_pct))
-    cand.sort(key=lambda c: -(c[2] if req.rank_by == "top_selling" else c[5]))
-    if req.top_n > 0:
-        cand = cand[:req.top_n]
+        cand.append((code, m, base1, base2, lost, lost / base1 * 100))
 
     con = db()
     evidence: dict[str, sqlite3.Row] = {}
@@ -1626,7 +1614,7 @@ async def api_revenue_loss(req: RevenueLossRequest):
     return {
         "window": {"start": oos_start, "end": oos_end, "days": window_days,
                    "data_from": data_lo, "data_to": data_hi, "covered_days": covered_days},
-        "params": {"rank_by": req.rank_by, "top_n": req.top_n, "min_oos_days": min_oos_days},
+        "params": {"min_oos_days": min_oos_days},
         "has_revenue": has_rev,
         "totals": {"uploaded": len(merged), "ranked": len(cand), "went_oos": went_oos,
                    "with_loss": len(items), "lost": sum(i["lost"] for i in items),

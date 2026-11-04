@@ -248,7 +248,6 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           rows, oos_start: $('revStart').value, oos_end: $('revEnd').value,
-          rank_by: $('revRank').value, top_n: Math.max(0, parseInt($('revTopN').value, 10) || 0),
           min_oos_days: Number($('revMinDays').value) || 1,
         }),
       });
@@ -290,12 +289,12 @@
       n.innerHTML = `⚠️ Synced GA4 data covers only <strong>${covered} of ${days} days</strong> of the selected range (data ${d.window.data_from} → ${d.window.data_to}). Products out of stock on the missing days are not flagged, so the loss is understated.`;
     } else {
       n.className = 'recency-note';
-      n.innerHTML = `📅 OOS counted over <strong>${d.window.start} → ${d.window.end}</strong> (${days} day${days === 1 ? '' : 's'}, fully covered by synced data). Checked ${d.params.top_n ? 'the top ' + d.params.top_n : 'all'} Month 1 products by <strong>${d.params.rank_by === 'top_selling' ? 'sales' : 'drop %'}</strong> for ≥ <strong>${d.params.min_oos_days}</strong> OOS day${d.params.min_oos_days === 1 ? '' : 's'}.${d.has_revenue ? '' : ' <strong>No revenue column found — loss is shown in units.</strong>'}`;
+      n.innerHTML = `📅 OOS counted over <strong>${d.window.start} → ${d.window.end}</strong> (${days} day${days === 1 ? '' : 's'}, fully covered by synced data). Checked all <strong>${fmt(t.ranked)}</strong> Month 1 products for ≥ <strong>${d.params.min_oos_days}</strong> OOS day${d.params.min_oos_days === 1 ? '' : 's'}.${d.has_revenue ? '' : ' <strong>No revenue column found — loss is shown in units.</strong>'}`;
     }
 
     const kpi = (label, value, sub, cls = '') => `<div class="rev-kpi ${cls}"><div class="rev-kpi-label">${label}</div><div class="rev-kpi-value">${value}</div><div class="rev-kpi-sub">${sub}</div></div>`;
     $('revKpis').innerHTML =
-      kpi('Month 1 products checked', fmt(t.ranked), `of ${fmt(t.uploaded)} uploaded · ${d.params.rank_by === 'top_selling' ? 'top sellers' : 'biggest drops'}`) +
+      kpi('Active in Month 1', fmt(t.ranked), `of ${fmt(t.uploaded)} uploaded · all that sold in Month 1`) +
       kpi('Went out of stock', fmt(t.went_oos), `${pct(t.went_oos, t.ranked)} of those checked`, 'accent') +
       kpi('With lost sales', fmt(t.with_loss), 'OOS and sold less than Month 1', 'accent') +
       kpi(d.has_revenue ? 'Revenue lost' : 'Units lost', fmt(t.lost), `${pct(t.lost, t.ranked_base1)} of their Month 1 ${d.has_revenue ? 'revenue' : 'units'}`, 'danger');
