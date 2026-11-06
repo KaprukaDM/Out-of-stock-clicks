@@ -612,3 +612,6 @@ tbody tr:last-child td { border-bottom: none; }
 .kp-alert-row { padding: 6px 0; border-bottom: 1px solid var(--border-light); font-size: 13px; color: var(--text-primary); }
 .kp-alert-row:last-child { border-bottom: none; }
 .badge-amber { display: inline-block; padding: 2px 9px; border-radius: 980px; background: var(--orange-bg); border: 1px solid #ffe0b2; color: #8a5a00; font-size: 12px; font-weight: 600; }
+
+/* Compare-periods picker: no upload cards any more. */
+.rev-sync-row .filter-group select { min-width: 210px; }
