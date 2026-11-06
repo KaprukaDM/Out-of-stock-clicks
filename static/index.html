@@ -172,6 +172,22 @@
           <button class="btn btn-secondary" id="tplXlsx" type="button">⬇ Excel template</button>
         </span>
       </div>
+      <div class="rev-sync" id="revSync">
+        <div class="rev-sync-head">
+          <h3>Synced Ninja sales <small id="revSyncCov">checking…</small></h3>
+          <span class="muted-note">Daily product-wise units from Ninja, pushed from the office machine. Units only — no vendor or selling price.</span>
+        </div>
+        <div class="rev-sync-row">
+          <div class="filter-group"><label>Month 1 (earlier)</label>
+            <div class="date-inputs"><input type="date" id="syncA1"><span>to</span><input type="date" id="syncA2"></div></div>
+          <div class="filter-group"><label>Month 2 (last month) — also the OOS range</label>
+            <div class="date-inputs"><input type="date" id="syncB1"><span>to</span><input type="date" id="syncB2"></div></div>
+          <div class="filter-group"><label>&nbsp;</label>
+            <button class="btn btn-primary" id="syncRun" type="button">Load synced sales &amp; analyse</button></div>
+        </div>
+        <div class="muted-note" id="syncMsg" hidden></div>
+      </div>
+      <div class="rev-or">or upload two files</div>
       <div class="rev-uploads">
         <div class="rev-card" data-slot="1">
           <div class="rev-card-head"><span class="rev-step">1</span><h3>Month 1 <small>(earlier month)</small></h3></div>
@@ -298,6 +314,6 @@
   </div>
 
   <script src="app.js?v=3"></script>
-  <script src="static/revenue.js?v=5"></script>
+  <script src="static/revenue.js?v=6"></script>
 </body>
 </html>

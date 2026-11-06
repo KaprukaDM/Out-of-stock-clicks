@@ -177,6 +177,69 @@
     });
   });
 
+  // ───────────── synced Ninja sales (units only)
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  (function defaultSyncRanges() {
+    const now = new Date();
+    const m = (off, last) => new Date(now.getFullYear(), now.getMonth() + off + (last ? 1 : 0), last ? 0 : 1);
+    $('syncA1').value = iso(m(-2, false)); $('syncA2').value = iso(m(-2, true));
+    $('syncB1').value = iso(m(-1, false)); $('syncB2').value = iso(m(-1, true));
+  })();
+
+  fetch('api/sales-coverage').then((r) => r.json()).then((c) => {
+    $('revSyncCov').textContent = c.days
+      ? `${c.days} day${c.days === 1 ? '' : 's'} synced · ${c.from} → ${c.to}`
+      : 'nothing synced yet — run tools/ninja_sync.py on the office machine';
+  }).catch(() => { $('revSyncCov').textContent = 'unavailable'; });
+
+  function fromSynced(label, data) {
+    const map = new Map(); let total = 0;
+    for (const r of data.rows) {
+      map.set(r.code, { name: r.name || '', vendor: '', qty: r.qty, rev: null });
+      total += r.qty;
+    }
+    return { name: label, map, total, revTotal: 0, bad: 0, hasRev: false, hasVendor: false, cols: null };
+  }
+
+  $('syncRun').addEventListener('click', async () => {
+    const msg = $('syncMsg'), btn = $('syncRun');
+    const a1 = $('syncA1').value, a2 = $('syncA2').value, b1 = $('syncB1').value, b2 = $('syncB2').value;
+    if (!(a1 && a2 && b1 && b2)) { msg.hidden = false; msg.textContent = 'Pick both date ranges.'; return; }
+    btn.disabled = true; btn.textContent = 'Loading…'; msg.hidden = true;
+    try {
+      const get = async (s, e) => {
+        const res = await fetch(`api/sales-range?start=${s}&end=${e}`);
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+        return res.json();
+      };
+      const [A, B] = await Promise.all([get(a1, a2), get(b1, b2)]);
+      const gaps = [[A, 'Month 1'], [B, 'Month 2']].filter(([d]) => d.days_synced < d.days_requested)
+        .map(([d, n]) => `${n}: ${d.days_synced} of ${d.days_requested} days synced`);
+      if (!A.days_synced || !B.days_synced) throw new Error('No synced sales for one of those ranges. ' + gaps.join(' · '));
+      files[1] = fromSynced(`Ninja ${a1} → ${a2}`, A);
+      files[2] = fromSynced(`Ninja ${b1} → ${b2}`, B);
+      [1, 2].forEach((s) => {
+        const f = files[s], d = s === 1 ? A : B;
+        const info = $('info' + s);
+        info.hidden = false; info.classList.remove('err');
+        info.innerHTML = `<div class="rev-file-name">✔ ${esc(f.name)}</div>
+          <div class="rev-file-stats"><span><strong>${f.map.size.toLocaleString()}</strong> products</span><span><strong>${fmt(f.total)}</strong> units</span><span class="rev-tag${d.days_synced < d.days_requested ? ' warn' : ''}">${d.days_synced}/${d.days_requested} days synced</span></div>`;
+        $('drop' + s).classList.add('has-file');
+      });
+      $('revStart').value = b1; $('revEnd').value = b2;
+      updateRunState();
+      const notes = [];
+      if (gaps.length) notes.push('Missing days — totals are understated. ' + gaps.join(' · '));
+      if (A.days_requested !== B.days_requested) notes.push(`The ranges differ in length (${A.days_requested} vs ${B.days_requested} days), so quantity drops are not like for like.`);
+      if (notes.length) { msg.hidden = false; msg.textContent = '⚠ ' + notes.join(' ⚠ '); }
+      await run();
+    } catch (e) {
+      msg.hidden = false; msg.textContent = e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Load synced sales & analyse';
+    }
+  });
+
   // ───────────── template download
   const TEMPLATE = [
     ['Product Code', 'Product Name', 'Vendor', 'Product Qty', 'Total Selling price'],
@@ -289,6 +352,14 @@
       kpi('With lost sales', fmt(t.with_loss), 'OOS and sold less than Month 1', 'accent') +
       kpi(d.has_revenue ? 'Revenue lost' : 'Units lost', fmt(t.lost), `${pct(t.lost, t.ranked_base1)} of their Month 1 ${d.has_revenue ? 'revenue' : 'units'}`, 'danger');
 
+    // Units-only data (synced from Ninja, or a file with no revenue column):
+    // the loss is in units, and there is no vendor to filter by.
+    const unitsOnly = !d.has_revenue;
+    document.querySelector('#revTable th[data-sort="lost"]').textContent = unitsOnly ? 'Units Lost' : 'Revenue Lost';
+    document.querySelector('#revTopTable thead th:nth-child(2)').textContent = unitsOnly ? 'Units Lost' : 'Revenue Lost';
+    $('revTopSeg').hidden = unitsOnly;
+    if (unitsOnly) st.topMetric = 'lost';
+    $('revVendorFilter').hidden = !d.items.some((i) => i.vendor !== 'Unknown');
     renderTop(); renderList();
   }
 

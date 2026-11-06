@@ -110,7 +110,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response
@@ -431,6 +431,20 @@ def init_db():
         PRIMARY KEY (product_code, date)
     )
     """)
+    # Daily product-code-wise sales, pushed from the office machine by
+    # tools/ninja_sync.py (see the "synced sales" section below).
+    con.execute("""
+    CREATE TABLE IF NOT EXISTS daily_sales (
+        date TEXT NOT NULL,
+        product_code TEXT NOT NULL,
+        product_name TEXT,
+        qty REAL DEFAULT 0,
+        stock REAL,
+        synced_at TEXT,
+        PRIMARY KEY (product_code, date)
+    )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sales_date ON daily_sales(date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_date ON oos_daily(date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_partner ON oos_daily(partner_code)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_category ON oos_daily(category)")
@@ -1489,6 +1503,99 @@ async def api_cache_clear():
     return {"ok": True, "entries_dropped": invalidate_cache()}
 
 
+# ------------------------------------------------------------------ synced sales
+# Ninja (the order-admin site) is only reachable from the office machine, so
+# the VPS never calls it. tools/ninja_sync.py runs there, pulls the Special
+# Sales Monitor report one day at a time, and POSTs each day here. The revenue
+# tab then adds up whatever two date ranges the user picks. The report gives
+# product code, a (truncated) name and the quantity sold - no vendor and no
+# selling price - so analyses built on it are in units, not revenue.
+#
+# Writes need SYNC_TOKEN (.env on the VPS, same value in the sync script's
+# .env.ninja). With no SYNC_TOKEN set the endpoint is disabled, not open.
+SYNC_TOKEN = os.environ.get("SYNC_TOKEN", "")
+
+
+class SalesDay(BaseModel):
+    date: str
+    rows: list[dict]
+
+
+class SalesSyncRequest(BaseModel):
+    days: list[SalesDay]
+
+
+@app.post("/api/sales-sync")
+async def api_sales_sync(req: SalesSyncRequest, x_sync_token: str | None = Header(None)):
+    import hmac
+    from datetime import date as _date
+    if not SYNC_TOKEN:
+        raise HTTPException(status_code=503, detail="sales sync is disabled (SYNC_TOKEN is not set on the server)")
+    if not x_sync_token or not hmac.compare_digest(x_sync_token, SYNC_TOKEN):
+        raise HTTPException(status_code=401, detail="bad sync token")
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    con = db()
+    out = []
+    try:
+        for d in req.days:
+            try:
+                _date.fromisoformat(d.date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"bad date {d.date!r}")
+            recs = {}
+            for r in d.rows:
+                code = str(r.get("code", "")).strip()
+                if not code:
+                    continue
+                try:
+                    qty = float(r.get("qty", 0))
+                except (TypeError, ValueError):
+                    continue
+                prev = recs.get(code)
+                recs[code] = (d.date, code, (str(r.get("name") or "").strip() or None),
+                              (prev[3] if prev else 0) + qty, r.get("stock"), now)
+            # A re-sync of a day replaces it, so a corrected report never doubles up.
+            con.execute("DELETE FROM daily_sales WHERE date = ?", (d.date,))
+            con.executemany("INSERT INTO daily_sales (date, product_code, product_name, qty, stock, synced_at) VALUES (?,?,?,?,?,?)",
+                            [(a, b, c, q, st, n) for (a, b, c, q, st, n) in recs.values()])
+            out.append({"date": d.date, "products": len(recs)})
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "days": out}
+
+
+@app.get("/api/sales-coverage")
+async def api_sales_coverage():
+    con = db()
+    row = con.execute("SELECT MIN(date) AS lo, MAX(date) AS hi, COUNT(DISTINCT date) AS days, MAX(synced_at) AS last FROM daily_sales").fetchone()
+    con.close()
+    return {"from": row["lo"], "to": row["hi"], "days": row["days"], "last_synced": row["last"]}
+
+
+@app.get("/api/sales-range")
+async def api_sales_range(start: str, end: str):
+    """Quantity sold per product code between two dates (inclusive), summed
+    over the synced days, plus how many of those days actually have data."""
+    from datetime import date as _date
+    start, end = validate_window(start, end)
+    if not start or not end:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    con = db()
+    rows = con.execute("""
+        SELECT product_code AS code, SUM(qty) AS qty, MAX(product_name) AS name
+        FROM daily_sales WHERE date BETWEEN ? AND ? GROUP BY product_code
+    """, (start, end)).fetchall()
+    have = con.execute("SELECT COUNT(DISTINCT date) AS n FROM daily_sales WHERE date BETWEEN ? AND ?", (start, end)).fetchone()["n"]
+    con.close()
+    return {
+        "start": start, "end": end,
+        "days_requested": (_date.fromisoformat(end) - _date.fromisoformat(start)).days + 1,
+        "days_synced": have,
+        "rows": [dict(r) for r in rows],
+    }
+
+
 # ------------------------------------------------------------------ revenue loss
 # Third tab. The user uploads two monthly sales extracts (Product Code, Product
 # Name, Vendor, Product Qty, Total Selling price) and we answer: of the
@@ -1618,7 +1725,9 @@ async def api_revenue_loss(req: RevenueLossRequest):
             continue    # went out of stock but sold as much or more - no loss
         items.append({
             "product_code": code,
-            "product_name": m["name"] or (ev["product_name"] if ev else None),
+            # Ninja truncates long names with ".."; GA4's copy is the full one.
+            "product_name": (ev["product_name"] if ev and ev["product_name"] and (not m["name"] or m["name"].endswith(".."))
+                             else m["name"]),
             "vendor": m["vendor"] or "Unknown",
             "category": extract_category(code) or "other",
             "qty_drop": m["m1"] - m["m2"],
