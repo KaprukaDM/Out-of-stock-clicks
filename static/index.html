@@ -115,6 +115,9 @@
       <button class="tab" id="tabRevenue" data-view="revenue" role="tab" aria-selected="false">
         💸 Revenue loss
       </button>
+      <button class="tab" id="tabKey" data-view="keyprod" role="tab" aria-selected="false">
+        ⭐ Key products
+      </button>
     </div>
 
     <div id="oosMain">
@@ -295,6 +298,50 @@
         <div class="pagination" id="revPagination"></div>
       </div>
     </section>
+
+    <!-- Key products: best sellers (synced Ninja sales) watched for stock-outs,
+         with a WhatsApp alert to the admin. Logic lives in static/keyprod.js. -->
+    <section id="kpPanel" hidden>
+      <div class="kp-head">
+        <div>
+          <h3>Key products <small>best sellers, last 7 and 14 days — watched hourly</small></h3>
+          <div class="kp-chips" id="kpChips"></div>
+        </div>
+        <div class="kp-actions">
+          <button class="btn btn-secondary" id="kpCheck" type="button">↻ Check now</button>
+          <button class="btn btn-secondary" id="kpTest" type="button">📲 Send test WhatsApp</button>
+        </div>
+      </div>
+      <div class="recency-note" id="kpNotice" hidden></div>
+      <div class="rev-kpis" id="kpKpis"></div>
+
+      <div class="rev-list-head">
+        <select id="kpFilter">
+          <option value="all">All key products</option>
+          <option value="oos">Out of stock now</option>
+          <option value="pinned">Pinned</option>
+        </select>
+        <input type="text" id="kpSearch" placeholder="Search product code or name…">
+        <span class="kp-pin-add">
+          <input type="text" id="kpPinCode" placeholder="Pin a product code…">
+          <button class="btn btn-secondary" id="kpPinBtn" type="button">☆ Pin</button>
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table id="kpTable">
+          <thead><tr>
+            <th>#</th><th>Product Code</th><th>Product Name</th>
+            <th>Units 7d</th><th>Units 14d</th><th>Per day</th>
+            <th>Status</th><th>OOS hits today</th><th>Days OOS (7d)</th><th>Alerted</th><th></th>
+          </tr></thead>
+          <tbody id="kpBody"></tbody>
+        </table>
+      </div>
+      <div class="rev-panel" style="margin-top:16px">
+        <h3>Recent alerts</h3>
+        <div id="kpAlerts" class="muted-note">—</div>
+      </div>
+    </section>
   </div>
 
   <div class="modal-overlay" id="trendModal">
@@ -315,5 +362,6 @@
 
   <script src="app.js?v=3"></script>
   <script src="static/revenue.js?v=6"></script>
+  <script src="static/keyprod.js?v=1"></script>
 </body>
 </html>

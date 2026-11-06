@@ -445,6 +445,14 @@ def init_db():
     )
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_sales_date ON daily_sales(date)")
+    # Key-product monitor: hand-pinned products, per-product alert state (so one
+    # stock-out = one alert), and a log of every digest attempted.
+    con.execute("CREATE TABLE IF NOT EXISTS key_pins (product_code TEXT PRIMARY KEY, added_at TEXT)")
+    con.execute("""CREATE TABLE IF NOT EXISTS key_state (
+        product_code TEXT PRIMARY KEY, state TEXT NOT NULL, since TEXT, last_alert_at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS alert_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, kind TEXT, count INTEGER,
+        sent INTEGER, detail TEXT, products TEXT)""")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_date ON oos_daily(date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_partner ON oos_daily(partner_code)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_oos_category ON oos_daily(category)")
@@ -507,7 +515,7 @@ async def fetch_oos_events(token: str, dims: dict, start_date: str, end_date: st
     return rows_out
 
 
-async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | None = None) -> dict:
+async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | None = None, intraday: bool = False) -> dict:
     """Pull out_of_stock_view rows from GA4 and upsert them into oos_daily.
 
     Default (no start/end): the last `days` days ending yesterday - what the
@@ -547,6 +555,13 @@ async def refresh_from_ga4(days: int = 30, start: str | None = None, end: str | 
         end_d = yesterday
         start_d = end_d - timedelta(days=days - 1)
         start_s, end_s = start_d.isoformat(), end_d.isoformat()
+
+    if intraday:
+        # Hourly monitor: yesterday + today so far. GA4 accepts the literal
+        # "today" and returns the hours processed so far; rows are upserted by
+        # (product_code, date), so the partial day is simply overwritten by the
+        # next pull and by the normal daily refresh.
+        start_s, end_s = yesterday.isoformat(), "today"
 
     oos_rows = await fetch_oos_events(token, dims, start_s, end_s)
 
@@ -1753,6 +1768,350 @@ async def api_revenue_loss(req: RevenueLossRequest):
     }
 
 
+# ------------------------------------------------------------------ key products
+# Key products = the best sellers in the synced Ninja daily sales: the union of
+# the top KEY_TOP_N by units over the last 7 days and over the last 14 days
+# (ending at the latest synced day), plus anything pinned by hand. Every hour
+# the monitor pulls today's GA4 out_of_stock_view events and, when a key
+# product gets its first out-of-stock hit of the day, sends ONE WhatsApp digest
+# to the admin(s). Detection is "shoppers landed on its out-of-stock page" -
+# the same signal as the rest of this dashboard - so it is only as fast as the
+# product has traffic, which a top seller does.
+#
+# One stock-out = one alert: key_state remembers a product as 'oos' once it was
+# alerted, and re-arms it after no hits for today and yesterday. If the send
+# fails (or WhatsApp is not configured) the state is NOT advanced, so the same
+# products are retried next hour instead of being silently dropped.
+MONITOR_ENABLED = os.environ.get("MONITOR_ENABLED", "1") != "0"
+MONITOR_INTERVAL_MIN = max(5, int(os.environ.get("MONITOR_INTERVAL_MIN", "60")))
+KEY_TOP_N = max(1, int(os.environ.get("KEY_TOP_N", "100")))
+# GA4 reports dates in the property's timezone; Sri Lanka is UTC+5:30.
+ALERT_TZ_HOURS = float(os.environ.get("ALERT_TZ_OFFSET_HOURS", "5.5"))
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://pricelens.lanka.info/oos/")
+
+# WhatsApp Cloud API (Meta). WHATSAPP_TO may hold several numbers, comma-
+# separated, in international format without "+". Free text only reaches a
+# number that messaged the business in the last 24h; for a dependable alert
+# create an approved template with one body variable and set WHATSAPP_TEMPLATE.
+WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
+WHATSAPP_ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
+WHATSAPP_TO = os.environ.get("WHATSAPP_TO", "")
+WHATSAPP_TEMPLATE = os.environ.get("WHATSAPP_TEMPLATE", "")
+WHATSAPP_TEMPLATE_LANG = os.environ.get("WHATSAPP_TEMPLATE_LANG", "en_US")
+WHATSAPP_GRAPH_VERSION = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
+
+_monitor_state: dict = {"running": False, "last_run": None, "last_result": None,
+                        "last_error": None, "next_run": None}
+_last_test_sent = 0.0
+
+
+def local_today():
+    from datetime import datetime, timedelta
+    return (datetime.utcnow() + timedelta(hours=ALERT_TZ_HOURS)).date()
+
+
+def whatsapp_configured() -> bool:
+    return bool(WHATSAPP_PHONE_ID and WHATSAPP_ACCESS_TOKEN and WHATSAPP_TO)
+
+
+def compute_key_products(con: sqlite3.Connection, top_n: int | None = None):
+    """-> (items, latest_sales_date). Items are sorted by 7-day units."""
+    from datetime import date, timedelta
+    top_n = top_n or KEY_TOP_N
+    pins = {r["product_code"] for r in con.execute("SELECT product_code FROM key_pins")}
+    latest = con.execute("SELECT MAX(date) AS d FROM daily_sales").fetchone()["d"]
+    rows = []
+    if latest:
+        ld = date.fromisoformat(latest)
+        d7 = (ld - timedelta(days=6)).isoformat()
+        d14 = (ld - timedelta(days=13)).isoformat()
+        rows = con.execute("""
+            SELECT product_code, MAX(product_name) AS name,
+                   SUM(CASE WHEN date >= ? THEN qty ELSE 0 END) AS u7, SUM(qty) AS u14
+            FROM daily_sales WHERE date BETWEEN ? AND ? GROUP BY product_code
+        """, (d7, d14, latest)).fetchall()
+        excluded = load_excluded_products()
+        rows = [r for r in rows if r["product_code"].lower() not in excluded]
+    by7 = sorted(rows, key=lambda r: -r["u7"])
+    top7 = {r["product_code"] for r in by7[:top_n] if r["u7"] > 0}
+    top14 = {r["product_code"] for r in sorted(rows, key=lambda r: -r["u14"])[:top_n] if r["u14"] > 0}
+    rank = {r["product_code"]: i + 1 for i, r in enumerate(by7)}
+    byc = {r["product_code"]: r for r in rows}
+    items = []
+    for code in top7 | top14 | pins:
+        r = byc.get(code)
+        why = [w for w, ok in (("top 7d", code in top7), ("top 14d", code in top14), ("pinned", code in pins)) if ok]
+        items.append({
+            "product_code": code, "name": r["name"] if r else None,
+            "u7": r["u7"] if r else 0, "u14": r["u14"] if r else 0,
+            "per_day": round(r["u7"] / 7, 1) if r else 0,
+            "rank": rank.get(code), "pinned": code in pins, "why": why,
+        })
+    items.sort(key=lambda i: -i["u7"])
+    return items, latest
+
+
+def oos_status_for(con: sqlite3.Connection, codes: list[str], today) -> dict[str, dict]:
+    """Out-of-stock evidence for specific codes over the last 7 days."""
+    from datetime import timedelta
+    d7 = (today - timedelta(days=6)).isoformat()
+    t = today.isoformat()
+    out: dict[str, dict] = {}
+    for i in range(0, len(codes), 500):
+        chunk = codes[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        for r in con.execute(f"""
+            SELECT product_code, MAX(product_name) AS pname,
+                   SUM(CASE WHEN date = ? THEN oos_views ELSE 0 END) AS hits_today,
+                   MAX(date) AS last_hit, COUNT(DISTINCT date) AS days7
+            FROM oos_daily WHERE date >= ? AND oos_views > 0 AND product_code IN ({marks})
+            GROUP BY product_code
+        """, [t, d7, *chunk]):
+            out[r["product_code"]] = dict(r)
+    return out
+
+
+async def send_whatsapp(single_line: str, multi_line: str) -> tuple[bool, str]:
+    if not whatsapp_configured():
+        return False, "WhatsApp is not configured on the server"
+    recipients = [x.strip() for x in WHATSAPP_TO.split(",") if x.strip()]
+    url = f"https://graph.facebook.com/{WHATSAPP_GRAPH_VERSION}/{WHATSAPP_PHONE_ID}/messages"
+    problems = []
+    async with httpx.AsyncClient(timeout=30) as c:
+        for to in recipients:
+            if WHATSAPP_TEMPLATE:
+                # Template variables may not contain newlines, hence the one-liner.
+                body = {"messaging_product": "whatsapp", "to": to, "type": "template",
+                        "template": {"name": WHATSAPP_TEMPLATE, "language": {"code": WHATSAPP_TEMPLATE_LANG},
+                                     "components": [{"type": "body", "parameters": [{"type": "text", "text": single_line[:900]}]}]}}
+            else:
+                body = {"messaging_product": "whatsapp", "to": to, "type": "text",
+                        "text": {"body": multi_line[:3900], "preview_url": False}}
+            try:
+                r = await c.post(url, headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}"}, json=body)
+                if r.status_code >= 300:
+                    problems.append(f"{to}: {r.status_code} {r.text[:200]}")
+            except Exception as e:
+                problems.append(f"{to}: {e}")
+    return (not problems), ("; ".join(problems) if problems else f"sent to {len(recipients)} recipient(s)")
+
+
+def _evaluate_keys() -> dict:
+    """Work out which key products newly went out of stock / recovered. Does not
+    write the 'oos' state - the caller does that only once the alert was sent."""
+    from datetime import timedelta
+    today = local_today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    con = db()
+    try:
+        items, latest = compute_key_products(con)
+        status = oos_status_for(con, [i["product_code"] for i in items], today)
+        state = {r["product_code"]: r["state"] for r in con.execute("SELECT product_code, state FROM key_state")}
+        new_oos, recovered = [], []
+        for it in items:
+            st = status.get(it["product_code"])
+            if st and st.get("pname") and (not it["name"] or it["name"].endswith("..")):
+                it["name"] = st["pname"]
+            hit_today = bool(st and st["hits_today"] > 0)
+            prev = state.get(it["product_code"])
+            if hit_today and prev != "oos":
+                new_oos.append({**it, "hits_today": st["hits_today"]})
+            elif prev == "oos" and not (st and st["last_hit"] >= yesterday):
+                recovered.append(it["product_code"])
+        if recovered:
+            con.executemany("UPDATE key_state SET state='ok', since=? WHERE product_code=?",
+                            [(today.isoformat(), c) for c in recovered])
+            con.commit()
+        oos_now = sum(1 for it in items if status.get(it["product_code"], {}).get("hits_today", 0) > 0)
+        return {"key_count": len(items), "oos_now": oos_now, "new_oos": new_oos,
+                "recovered": len(recovered), "sales_through": latest}
+    finally:
+        con.close()
+
+
+def _commit_alerted(codes: list[str]) -> None:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    today = local_today().isoformat()
+    con = db()
+    try:
+        con.executemany("""INSERT INTO key_state (product_code, state, since, last_alert_at) VALUES (?, 'oos', ?, ?)
+                           ON CONFLICT(product_code) DO UPDATE SET state='oos', since=excluded.since, last_alert_at=excluded.last_alert_at""",
+                        [(c, today, now) for c in codes])
+        con.commit()
+    finally:
+        con.close()
+
+
+def _log_alert(kind: str, count: int, sent: bool, detail: str, products: list[str]) -> None:
+    import json
+    con = db()
+    try:
+        con.execute("INSERT INTO alert_log (ts, kind, count, sent, detail, products) VALUES (?,?,?,?,?,?)",
+                    (time.strftime("%Y-%m-%d %H:%M:%S"), kind, count, 1 if sent else 0, detail[:500], json.dumps(products[:50])))
+        con.commit()
+    finally:
+        con.close()
+
+
+def build_digest(new_oos: list[dict]) -> tuple[str, str]:
+    shown = sorted(new_oos, key=lambda i: -i["u7"])[:15]
+    more = len(new_oos) - len(shown)
+    def label(i):
+        return f"{i['name'] or i['product_code']} ({i['product_code']}) - {i['per_day']:g}/day"
+    multi = [f"⚠️ {len(new_oos)} key product{'s' if len(new_oos) != 1 else ''} out of stock"]
+    multi += [f"{n}. {label(i)}" for n, i in enumerate(shown, 1)]
+    if more > 0:
+        multi.append(f"+{more} more")
+    multi.append(APP_PUBLIC_URL)
+    single = f"{len(new_oos)} key product{'s' if len(new_oos) != 1 else ''} out of stock: " + " | ".join(label(i) for i in shown) + (f" | +{more} more" if more > 0 else "")
+    return single, "\n".join(multi)
+
+
+async def monitor_check(pull: bool = True, notify: bool = True) -> dict:
+    if _monitor_state["running"]:
+        return {"skipped": "a check is already running"}
+    _monitor_state["running"] = True
+    result: dict = {}
+    try:
+        if pull:
+            if _refresh_state["status"] == "running":
+                result["pull"] = "skipped (a full refresh is running)"
+            elif not (GA4_PROPERTY_ID and GA4_REFRESH_TOKEN):
+                result["pull"] = "skipped (GA4 not configured)"
+            else:
+                try:
+                    r = await refresh_from_ga4(intraday=True)
+                    result["pull"] = {"rows": r["rows_upserted"], "range": r["date_range"]}
+                except Exception as e:
+                    result["pull"] = {"error": str(e)}
+        ev = await asyncio.to_thread(_evaluate_keys)
+        new_oos = ev.pop("new_oos")
+        result.update(ev)
+        result["new_oos"] = len(new_oos)
+        if new_oos and notify:
+            single, multi = build_digest(new_oos)
+            ok, detail = await send_whatsapp(single, multi)
+            codes = [i["product_code"] for i in new_oos]
+            await asyncio.to_thread(_log_alert, "oos", len(new_oos), ok, detail, codes)
+            if ok:
+                await asyncio.to_thread(_commit_alerted, codes)
+            result["alert"] = {"sent": ok, "detail": detail}
+        _monitor_state["last_error"] = None
+    except Exception as e:
+        _monitor_state["last_error"] = str(e)
+        result["error"] = str(e)
+    finally:
+        _monitor_state["running"] = False
+        _monitor_state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _monitor_state["last_result"] = result
+    return result
+
+
+async def _monitor_loop() -> None:
+    from datetime import datetime, timedelta
+    await asyncio.sleep(90)   # let the server finish starting and warm its cache
+    while True:
+        await monitor_check(pull=True, notify=True)
+        _monitor_state["next_run"] = (datetime.now() + timedelta(minutes=MONITOR_INTERVAL_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+        await asyncio.sleep(MONITOR_INTERVAL_MIN * 60)
+
+
+@app.on_event("startup")
+async def _start_monitor():
+    if MONITOR_ENABLED and GA4_PROPERTY_ID:
+        asyncio.create_task(_monitor_loop())
+
+
+@app.get("/api/key-products")
+async def api_key_products(top_n: int | None = Query(None, ge=1, le=1000)):
+    from datetime import timedelta
+    today = local_today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    con = db()
+    try:
+        items, latest = compute_key_products(con, top_n)
+        status = oos_status_for(con, [i["product_code"] for i in items], today)
+        state = {r["product_code"]: dict(r) for r in con.execute("SELECT * FROM key_state")}
+        alerts = [dict(r) for r in con.execute("SELECT id, ts, kind, count, sent, detail FROM alert_log ORDER BY id DESC LIMIT 10")]
+    finally:
+        con.close()
+    for it in items:
+        st = status.get(it["product_code"]) or {}
+        it["hits_today"] = st.get("hits_today", 0)
+        it["days_oos_7d"] = st.get("days7", 0)
+        it["last_hit"] = st.get("last_hit")
+        if st.get("pname") and (not it["name"] or it["name"].endswith("..")):
+            it["name"] = st["pname"]   # GA4 has the full name; Ninja truncates with ".."
+        it["status"] = "oos" if it["hits_today"] > 0 else ("recent" if st.get("last_hit") == yesterday else "ok")
+        ks = state.get(it["product_code"])
+        it["alerted"] = bool(ks and ks["state"] == "oos")
+        it["last_alert_at"] = ks["last_alert_at"] if ks else None
+    stale_days = None
+    if latest:
+        from datetime import date as _d
+        stale_days = (today - _d.fromisoformat(latest)).days
+    return {
+        "items": items,
+        "meta": {
+            "top_n": top_n or KEY_TOP_N, "sales_through": latest, "sales_age_days": stale_days,
+            "today": today.isoformat(), "key_count": len(items),
+            "oos_now": sum(1 for i in items if i["status"] == "oos"),
+            "pinned": sum(1 for i in items if i["pinned"]),
+            "whatsapp": {"configured": whatsapp_configured(),
+                         "mode": "template" if WHATSAPP_TEMPLATE else "text",
+                         "recipients": len([x for x in WHATSAPP_TO.split(",") if x.strip()])},
+            "monitor": {"enabled": MONITOR_ENABLED and bool(GA4_PROPERTY_ID), "interval_min": MONITOR_INTERVAL_MIN,
+                        "running": _monitor_state["running"], "last_run": _monitor_state["last_run"],
+                        "next_run": _monitor_state["next_run"], "last_error": _monitor_state["last_error"],
+                        "last_result": _monitor_state["last_result"]},
+        },
+        "alerts": alerts,
+    }
+
+
+class PinRequest(BaseModel):
+    code: str
+    pinned: bool = True
+
+
+@app.post("/api/key-products/pin")
+async def api_key_pin(req: PinRequest):
+    code = req.code.strip()
+    if not code or len(code) > 200:
+        raise HTTPException(status_code=400, detail="product code required")
+    con = db()
+    try:
+        if req.pinned:
+            con.execute("INSERT OR IGNORE INTO key_pins (product_code, added_at) VALUES (?, ?)", (code, time.strftime("%Y-%m-%d %H:%M:%S")))
+        else:
+            con.execute("DELETE FROM key_pins WHERE product_code = ?", (code,))
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "code": code, "pinned": req.pinned}
+
+
+@app.post("/api/monitor/check")
+async def api_monitor_check(pull: bool = True):
+    """Run the hourly check now. Idempotent: it only alerts for key products
+    that have not already been alerted for this stock-out."""
+    return await monitor_check(pull=pull, notify=True)
+
+
+@app.post("/api/monitor/test")
+async def api_monitor_test():
+    """Send a fixed test message so the WhatsApp setup can be verified. Fixed
+    body and rate-limited, because this dashboard has no login."""
+    global _last_test_sent
+    if time.time() - _last_test_sent < 60:
+        raise HTTPException(status_code=429, detail="a test message was just sent - wait a minute")
+    _last_test_sent = time.time()
+    msg = "✅ Kapruka key-product stock alerts: test message. If you can read this, alerts are set up."
+    ok, detail = await send_whatsapp(msg, msg)
+    await asyncio.to_thread(_log_alert, "test", 0, ok, detail, [])
+    return {"sent": ok, "detail": detail}
+
+
 # ------------------------------------------------------------------ static
 @app.get("/")
 async def index():
@@ -1764,6 +2123,9 @@ async def index():
     rev = STATIC / "revenue.js"
     if rev.exists():
         html = re.sub(r"static/revenue\.js\?v=\w+", f"static/revenue.js?v={int(rev.stat().st_mtime)}", html)
+    kp = STATIC / "keyprod.js"
+    if kp.exists():
+        html = re.sub(r"static/keyprod\.js\?v=\w+", f"static/keyprod.js?v={int(kp.stat().st_mtime)}", html)
     css = STATIC / "style.css"
     if css.exists():
         html = re.sub(r"style\.css\?v=\w+", f"style.css?v={int(css.stat().st_mtime)}", html)
