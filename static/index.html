@@ -171,7 +171,7 @@
       <div class="rev-sync">
         <div class="rev-sync-head">
           <h3>Compare sales periods <small id="revSyncCov"></small></h3>
-          <span class="muted-note">Daily product-wise units from Ninja. Finds products that sold less in the current period and were out of stock during it.</span>
+          <span class="muted-note">Daily product-wise units from Ninja plus GA4 out-of-stock data, both fetched for whichever periods you pick. Finds products that sold less in the current period and were out of stock during it.</span>
         </div>
         <div class="rev-sync-row">
           <div class="filter-group"><label>Compare</label>
@@ -184,10 +184,13 @@
               <option value="month">This month vs last month</option>
               <option value="custom">Custom</option>
             </select></div>
+          <div id="cmpCustom" hidden>
           <div class="filter-group"><label>Previous period</label>
             <div class="date-inputs"><input type="date" id="prevA"><span>to</span><input type="date" id="prevB"></div></div>
           <div class="filter-group"><label title="Out-of-stock days are counted inside the current period">Current period</label>
             <div class="date-inputs"><input type="date" id="curA"><span>to</span><input type="date" id="curB"></div></div>
+          </div>
+          <div class="filter-group" id="cmpSummaryWrap"><label>Periods compared</label><div id="cmpSummary" class="cmp-summary"></div></div>
           <div class="filter-group"><label title="A product counts only if it was out of stock on at least this many days in the current period">Min OOS days</label>
             <input type="number" id="revMinDays" value="1" min="1" max="31" step="1" style="width:90px"></div>
           <div class="filter-group"><label>&nbsp;</label>

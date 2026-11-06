@@ -615,3 +615,7 @@ tbody tr:last-child td { border-bottom: none; }
 
 /* Compare-periods picker: no upload cards any more. */
 .rev-sync-row .filter-group select { min-width: 210px; }
+
+#cmpCustom { display: contents; }
+#cmpCustom[hidden], #cmpSummaryWrap[hidden] { display: none; }
+.cmp-summary { padding: 9px 12px; font-size: 14px; font-weight: 600; color: var(--accent); background: var(--accent-bg); border-radius: var(--radius-sm); white-space: nowrap; }

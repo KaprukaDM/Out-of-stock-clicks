@@ -81,12 +81,20 @@
     return { cur: [addDays(y, -(n - 1)), y], prev: [addDays(y, -(2 * n - 1)), addDays(y, -n)] };
   }
 
+  // Only the Compare dropdown is shown; the four dates are filled in for you
+  // and appear for editing only under "Custom".
+  const nice = (d) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   function applyPreset() {
     const kind = $('cmpPreset').value;
-    if (kind === 'custom') return;
+    const custom = kind === 'custom';
+    $('cmpCustom').hidden = !custom;
+    $('cmpSummaryWrap').hidden = custom;
+    if (custom) return;
     const r = presetRanges(kind);
     $('prevA').value = iso(r.prev[0]); $('prevB').value = iso(r.prev[1]);
     $('curA').value = iso(r.cur[0]); $('curB').value = iso(r.cur[1]);
+    const span = (a) => (iso(a[0]) === iso(a[1]) ? nice(a[0]) : `${nice(a[0])} – ${nice(a[1])}`);
+    $('cmpSummary').textContent = `${span(r.prev)}  vs  ${span(r.cur)}`;
   }
   $('cmpPreset').addEventListener('change', applyPreset);
   // Editing a date by hand turns the preset into Custom.
@@ -108,14 +116,60 @@
     return res.json();
   }
 
+  // ───────────── make sure both data sources cover the picked ranges
+  // Picking a range should never be a dead end: GA4 out-of-stock data the
+  // server is missing is pulled by the server itself, and Ninja sales it is
+  // missing are queued for the office machine's watcher (tools/ninja_sync.py
+  // --watch). We wait for both, show progress, and then analyse.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function post(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    return res.json();
+  }
+
+  async function ensureGa4(a, b, say) {
+    for (let round = 0; round < 3; round++) {
+      const r = await post('api/ga4-ensure', { start: a, end: b });
+      if (r.covered) return;
+      say(`Pulling GA4 out-of-stock data for ${a} → ${b}… this can take a couple of minutes.`);
+      for (let i = 0; i < 120; i++) {
+        await sleep(3000);
+        const s = await (await fetch('api/refresh/status')).json();
+        if (s.status === 'error') throw new Error('GA4 pull failed: ' + s.error);
+        if (s.status !== 'running') break;
+      }
+    }
+  }
+
+  async function ensureSales(ranges, say) {
+    const missing = new Set();
+    for (const [a, b] of ranges) (await post('api/sales-request', { start: a, end: b })).missing.forEach((d) => missing.add(d));
+    if (!missing.size) return;
+    const total = missing.size, t0 = Date.now();
+    for (;;) {
+      const cov = await (await fetch('api/sales-coverage')).json();
+      if (!cov.pending_requests) return;
+      const listening = cov.watcher_age_s != null && cov.watcher_age_s < 120;
+      say(`Fetching ${total - cov.pending_requests} of ${total} missing sales days from Ninja…` +
+        (listening ? '' : ' No office-machine watcher seen recently: run “python tools/ninja_sync.py --watch” there.'));
+      if (Date.now() - t0 > 5 * 60 * 1000) return;   // carry on with what we have; the gap warning will say so
+      await sleep(4000);
+    }
+  }
+
   async function run() {
     const msg = $('syncMsg'), btn = $('revRun');
     const p1 = $('prevA').value, p2 = $('prevB').value, c1 = $('curA').value, c2 = $('curB').value;
     msg.hidden = true;
     if (!(p1 && p2 && c1 && c2)) { msg.hidden = false; msg.textContent = 'Pick both date ranges.'; return; }
     if (p1 > p2 || c1 > c2) { msg.hidden = false; msg.textContent = 'A range starts after it ends.'; return; }
-    btn.disabled = true; btn.textContent = 'Analysing…';
+    btn.disabled = true; btn.textContent = 'Syncing…';
+    const say = (t) => { msg.hidden = false; msg.textContent = t; };
     try {
+      await ensureGa4(c1, c2, say);
+      await ensureSales([[p1, p2], [c1, c2]], say);
+      btn.textContent = 'Analysing…'; msg.hidden = true;
       const [A, B] = await Promise.all([getRange(p1, p2), getRange(c1, c2)]);
       const gaps = [[A, 'Previous'], [B, 'Current']].filter(([d]) => d.days_synced < d.days_requested)
         .map(([d, n]) => `${n}: ${d.days_synced} of ${d.days_requested} days synced`);

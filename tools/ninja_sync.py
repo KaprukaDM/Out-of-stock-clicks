@@ -21,6 +21,7 @@ Usage (from this folder or anywhere):
     python tools/ninja_sync.py --days 7             # last 7 days up to yesterday
     python tools/ninja_sync.py --start 2026-09-01 --end 2026-10-31
     python tools/ninja_sync.py --start 2026-10-15 --end 2026-10-15 --dry-run
+    python tools/ninja_sync.py --watch              # keep running; fill days the dashboard asks for
 
 Re-syncing a day replaces it on the server, so re-running is safe. Today is
 skipped by default because the day isn't finished (use --include-today).
@@ -31,6 +32,7 @@ import argparse
 import base64
 import html
 import json
+import os
 import re
 import sys
 import time
@@ -50,7 +52,7 @@ ROW_RE = re.compile(
 
 
 def load_config() -> dict:
-    path = HERE / ".env.ninja"
+    path = Path(os.environ["NINJA_ENV_FILE"]) if os.environ.get("NINJA_ENV_FILE") else HERE / ".env.ninja"
     if not path.exists():
         sys.exit(f"Missing {path} - copy .env.ninja.example to .env.ninja and fill it in.")
     cfg = {}
@@ -110,6 +112,34 @@ def push(cfg: dict, day: date, rows: list[dict]) -> None:
         raise RuntimeError(f"{day}: dashboard rejected the upload ({e.code} {e.read().decode(errors='replace')[:200]})")
 
 
+def watch(cfg: dict, interval: int = 30) -> None:
+    """Poll the dashboard for sales days it is missing (the user picked a date
+    range it doesn't have yet) and fetch them from Ninja. Polling doubles as the
+    heartbeat the dashboard uses to tell whether anyone is listening."""
+    print(f"watching {cfg['VPS_URL']} for requested days (every {interval}s). Ctrl+C to stop.")
+    while True:
+        try:
+            req = urllib.request.Request(f"{cfg['VPS_URL']}/api/sales-requests",
+                                         headers={"X-Sync-Token": cfg["SYNC_TOKEN"], "User-Agent": "kapruka-oos-sync"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                dates = json.loads(r.read())["dates"]
+        except Exception as e:
+            print(f"{time.strftime('%H:%M:%S')} could not reach the dashboard: {e}")
+            time.sleep(interval)
+            continue
+        for ds in dates:
+            day = date.fromisoformat(ds)
+            if day >= date.today():
+                continue
+            try:
+                rows = fetch_day(cfg, day)
+                push(cfg, day, rows)
+                print(f"{time.strftime('%H:%M:%S')} {day}  {len(rows):>5} products  uploaded (requested)")
+            except Exception as e:
+                print(f"{time.strftime('%H:%M:%S')} {day}  FAILED: {e}")
+        time.sleep(5 if dates else interval)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--start")
@@ -117,7 +147,11 @@ def main() -> None:
     ap.add_argument("--days", type=int, help="last N days up to yesterday")
     ap.add_argument("--include-today", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="fetch and parse only; do not upload")
+    ap.add_argument("--watch", action="store_true", help="keep running and fill the days the dashboard requests")
     a = ap.parse_args()
+    if a.watch:
+        watch(load_config())
+        return
 
     today = date.today()
     last_day = today if a.include_today else today - timedelta(days=1)

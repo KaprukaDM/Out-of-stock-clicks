@@ -445,6 +445,9 @@ def init_db():
     )
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_sales_date ON daily_sales(date)")
+    # Days the dashboard needs but has no Ninja sales for yet. The office
+    # machine's watcher (tools/ninja_sync.py --watch) polls these and fills them.
+    con.execute("CREATE TABLE IF NOT EXISTS sales_requests (date TEXT PRIMARY KEY, requested_at TEXT)")
     # Key-product monitor: hand-pinned products, per-product alert state (so one
     # stock-out = one alert), and a log of every digest attempted.
     con.execute("CREATE TABLE IF NOT EXISTS key_pins (product_code TEXT PRIMARY KEY, added_at TEXT)")
@@ -1571,6 +1574,7 @@ async def api_sales_sync(req: SalesSyncRequest, x_sync_token: str | None = Heade
                               (prev[3] if prev else 0) + qty, r.get("stock"), now)
             # A re-sync of a day replaces it, so a corrected report never doubles up.
             con.execute("DELETE FROM daily_sales WHERE date = ?", (d.date,))
+            con.execute("DELETE FROM sales_requests WHERE date = ?", (d.date,))
             con.executemany("INSERT INTO daily_sales (date, product_code, product_name, qty, stock, synced_at) VALUES (?,?,?,?,?,?)",
                             [(a, b, c, q, st, n) for (a, b, c, q, st, n) in recs.values()])
             out.append({"date": d.date, "products": len(recs)})
@@ -1584,8 +1588,91 @@ async def api_sales_sync(req: SalesSyncRequest, x_sync_token: str | None = Heade
 async def api_sales_coverage():
     con = db()
     row = con.execute("SELECT MIN(date) AS lo, MAX(date) AS hi, COUNT(DISTINCT date) AS days, MAX(synced_at) AS last FROM daily_sales").fetchone()
+    pending = con.execute("SELECT COUNT(*) AS n FROM sales_requests").fetchone()["n"]
     con.close()
-    return {"from": row["lo"], "to": row["hi"], "days": row["days"], "last_synced": row["last"]}
+    return {"from": row["lo"], "to": row["hi"], "days": row["days"], "last_synced": row["last"],
+            "pending_requests": pending, "watcher_last_seen": _watcher_seen.get("ts"),
+            "watcher_age_s": int(time.time() - _watcher_seen["t"]) if _watcher_seen.get("t") else None}
+
+
+_watcher_seen: dict = {}
+
+
+class SalesRangeRequest(BaseModel):
+    start: str
+    end: str
+
+
+@app.post("/api/sales-request")
+async def api_sales_request(req: SalesRangeRequest):
+    """The picked date range needs sales days we don't have yet: queue them for
+    the office machine's watcher. Today and later are never requested (the day
+    isn't finished). Returns the missing days so the page can wait on them."""
+    from datetime import date as _d, timedelta
+    start, end = validate_window(req.start, req.end)
+    if not start or not end:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    last = min(_d.fromisoformat(end), local_today() - timedelta(days=1))
+    first = _d.fromisoformat(start)
+    if (last - first).days > 400:
+        raise HTTPException(status_code=400, detail="range too long (max 400 days)")
+    con = db()
+    try:
+        have = {r["date"] for r in con.execute("SELECT DISTINCT date FROM daily_sales WHERE date BETWEEN ? AND ?", (start, last.isoformat()))}
+        missing, d = [], first
+        while d <= last:
+            if d.isoformat() not in have:
+                missing.append(d.isoformat())
+            d += timedelta(days=1)
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        con.executemany("INSERT OR IGNORE INTO sales_requests (date, requested_at) VALUES (?, ?)", [(m, now) for m in missing])
+        con.commit()
+    finally:
+        con.close()
+    return {"missing": missing, "watcher_age_s": int(time.time() - _watcher_seen["t"]) if _watcher_seen.get("t") else None}
+
+
+@app.get("/api/sales-requests")
+async def api_sales_requests(x_sync_token: str | None = Header(None)):
+    """What the watcher should fetch next (oldest first). Polling also acts as
+    its heartbeat, so the page can tell whether anyone is listening."""
+    import hmac
+    if not SYNC_TOKEN:
+        raise HTTPException(status_code=503, detail="sales sync is disabled (SYNC_TOKEN is not set on the server)")
+    if not x_sync_token or not hmac.compare_digest(x_sync_token, SYNC_TOKEN):
+        raise HTTPException(status_code=401, detail="bad sync token")
+    _watcher_seen["t"] = time.time()
+    _watcher_seen["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    con = db()
+    rows = con.execute("SELECT date FROM sales_requests ORDER BY date LIMIT 60").fetchall()
+    con.close()
+    return {"dates": [r["date"] for r in rows]}
+
+
+@app.post("/api/ga4-ensure")
+async def api_ga4_ensure(req: SalesRangeRequest):
+    """Make sure GA4 out-of-stock data covers the picked range. If it doesn't,
+    start a background backfill of the range (the VPS can reach GA4 itself) and
+    let the page poll /api/refresh/status. Coverage is judged on the first/last
+    synced date; today is never pulled here (the hourly monitor owns that)."""
+    from datetime import date as _d, timedelta
+    start, end = validate_window(req.start, req.end)
+    if not start or not end:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    end_eff = min(_d.fromisoformat(end), _d.today() - timedelta(days=1)).isoformat()
+    if start > end_eff:
+        return {"covered": True, "started": False}
+    con = db()
+    cov = con.execute("SELECT MIN(date) AS lo, MAX(date) AS hi FROM oos_daily").fetchone()
+    con.close()
+    if cov["lo"] and start >= cov["lo"] and end_eff <= cov["hi"]:
+        return {"covered": True, "started": False}
+    if _refresh_state["status"] == "running":
+        return {"covered": False, "started": False, "running": True}
+    if not (GA4_PROPERTY_ID and GA4_REFRESH_TOKEN):
+        raise HTTPException(status_code=503, detail="GA4 is not configured on the server")
+    asyncio.create_task(_run_refresh_in_background(30, start, end_eff))
+    return {"covered": False, "started": True, "range": [start, end_eff]}
 
 
 @app.get("/api/sales-range")
@@ -1876,7 +1963,7 @@ async def send_whatsapp(single_line: str, multi_line: str) -> tuple[bool, str]:
         return False, "WhatsApp is not configured on the server"
     recipients = [x.strip() for x in WHATSAPP_TO.split(",") if x.strip()]
     url = f"https://graph.facebook.com/{WHATSAPP_GRAPH_VERSION}/{WHATSAPP_PHONE_ID}/messages"
-    problems = []
+    problems, ids = [], []
     async with httpx.AsyncClient(timeout=30) as c:
         for to in recipients:
             if WHATSAPP_TEMPLATE:
@@ -1891,9 +1978,33 @@ async def send_whatsapp(single_line: str, multi_line: str) -> tuple[bool, str]:
                 r = await c.post(url, headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}"}, json=body)
                 if r.status_code >= 300:
                     problems.append(f"{to}: {r.status_code} {r.text[:200]}")
+                else:
+                    try:
+                        ids.append(r.json()["messages"][0]["id"][-14:])
+                    except (ValueError, KeyError, IndexError):
+                        pass
             except Exception as e:
                 problems.append(f"{to}: {e}")
-    return (not problems), ("; ".join(problems) if problems else f"sent to {len(recipients)} recipient(s)")
+    return (not problems), ("; ".join(problems) if problems else f"accepted by Meta for {len(recipients)} recipient(s)" + (f" (id …{ids[0]})" if ids else ""))
+
+
+def current_oos_key_items() -> list[dict]:
+    """Key products with an out-of-stock hit today, biggest sellers first."""
+    today = local_today()
+    con = db()
+    try:
+        items, _ = compute_key_products(con)
+        status = oos_status_for(con, [i["product_code"] for i in items], today)
+    finally:
+        con.close()
+    out = []
+    for it in items:
+        st = status.get(it["product_code"])
+        if st and st["hits_today"] > 0:
+            if st.get("pname") and (not it["name"] or it["name"].endswith("..")):
+                it["name"] = st["pname"]
+            out.append({**it, "hits_today": st["hits_today"]})
+    return sorted(out, key=lambda i: -i["u7"])
 
 
 def _evaluate_keys() -> dict:
@@ -1953,17 +2064,17 @@ def _log_alert(kind: str, count: int, sent: bool, detail: str, products: list[st
         con.close()
 
 
-def build_digest(new_oos: list[dict]) -> tuple[str, str]:
+def build_digest(new_oos: list[dict], prefix: str = "") -> tuple[str, str]:
     shown = sorted(new_oos, key=lambda i: -i["u7"])[:15]
     more = len(new_oos) - len(shown)
     def label(i):
         return f"{i['name'] or i['product_code']} ({i['product_code']}) - {i['per_day']:g}/day"
-    multi = [f"⚠️ {len(new_oos)} key product{'s' if len(new_oos) != 1 else ''} out of stock"]
+    multi = [f"{prefix}⚠️ {len(new_oos)} key product{'s' if len(new_oos) != 1 else ''} out of stock"]
     multi += [f"{n}. {label(i)}" for n, i in enumerate(shown, 1)]
     if more > 0:
         multi.append(f"+{more} more")
     multi.append(APP_PUBLIC_URL)
-    single = f"{len(new_oos)} key product{'s' if len(new_oos) != 1 else ''} out of stock: " + " | ".join(label(i) for i in shown) + (f" | +{more} more" if more > 0 else "")
+    single = f"{prefix}{len(new_oos)} key product{'s' if len(new_oos) != 1 else ''} out of stock: " + " | ".join(label(i) for i in shown) + (f" | +{more} more" if more > 0 else "")
     return single, "\n".join(multi)
 
 
@@ -2100,16 +2211,22 @@ async def api_monitor_check(pull: bool = True):
 
 @app.post("/api/monitor/test")
 async def api_monitor_test():
-    """Send a fixed test message so the WhatsApp setup can be verified. Fixed
-    body and rate-limited, because this dashboard has no login."""
+    """Send a TEST message with the key products that are out of stock right
+    now (same format as a real alert), so the WhatsApp setup and the message
+    can be checked. It does not mark anything as alerted. Rate-limited,
+    because this dashboard has no login."""
     global _last_test_sent
     if time.time() - _last_test_sent < 60:
         raise HTTPException(status_code=429, detail="a test message was just sent - wait a minute")
     _last_test_sent = time.time()
-    msg = "✅ Kapruka key-product stock alerts: test message. If you can read this, alerts are set up."
-    ok, detail = await send_whatsapp(msg, msg)
-    await asyncio.to_thread(_log_alert, "test", 0, ok, detail, [])
-    return {"sent": ok, "detail": detail}
+    items = await asyncio.to_thread(current_oos_key_items)
+    if items:
+        single, multi = build_digest(items, prefix="🧪 TEST - ")
+    else:
+        single = multi = "🧪 TEST - no key products are out of stock right now. Alerts are set up."
+    ok, detail = await send_whatsapp(single, multi)
+    await asyncio.to_thread(_log_alert, "test", len(items), ok, detail, [i["product_code"] for i in items])
+    return {"sent": ok, "detail": detail, "products": len(items)}
 
 
 # ------------------------------------------------------------------ static
