@@ -619,3 +619,9 @@ tbody tr:last-child td { border-bottom: none; }
 #cmpCustom { display: contents; }
 #cmpCustom[hidden], #cmpSummaryWrap[hidden] { display: none; }
 .cmp-summary { padding: 9px 12px; font-size: 14px; font-weight: 600; color: var(--accent); background: var(--accent-bg); border-radius: var(--radius-sm); white-space: nowrap; }
+
+/* Revenue loss table: + Price and Revenue Lost columns (13 total). */
+#revTable { min-width: 1640px; }
+#revTable th:nth-child(11), #revTable td:nth-child(11) { width: 90px; }
+#revTable th:nth-child(12), #revTable td:nth-child(12) { width: 100px; }
+#revTable th:nth-child(13), #revTable td:nth-child(13) { width: 140px; }

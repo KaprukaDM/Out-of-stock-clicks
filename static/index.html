@@ -209,8 +209,8 @@
             <div class="rev-panel-head">
               <h3>Top products <small>click one for its OOS trend</small></h3>
               <div class="rev-seg" id="revTopSeg">
-                <button class="active" data-metric="lost">Revenue lost</button>
-                <button data-metric="qty_drop">Quantity drop</button>
+                <button class="active" data-metric="rev_lost">Revenue lost</button>
+                <button data-metric="lost">Units lost</button>
               </div>
             </div>
             <div id="revTopChart"></div>
@@ -222,7 +222,7 @@
                 <thead><tr>
                   <th>Product</th>
                   <th>Revenue Lost</th>
-                  <th>Qty Drop</th>
+                  <th>Units Lost</th>
                   <th>Drop %</th>
                   <th>OOS Hits</th>
                 </tr></thead>
@@ -252,7 +252,9 @@
               <th class="sortable" data-sort="m2" title="Quantity sold in the current period">Qty Now</th>
               <th class="sortable" data-sort="qty_drop" title="Quantity drop, previous to current period">Qty Drop</th>
               <th class="sortable" data-sort="qty_drop_pct">Drop %</th>
-              <th class="sortable" data-sort="lost" title="Month 1 total selling price minus Month 2">Revenue Lost</th>
+              <th class="sortable" data-sort="lost" title="Units sold in the previous period minus the current period">Units Lost</th>
+              <th class="sortable" data-sort="price" title="Current checkout price in LKR, from Kapruka's MCP">Price (LKR)</th>
+              <th class="sortable" data-sort="rev_lost" title="Units lost × current price. An estimate: the price during the period may have differed.">Revenue Lost (LKR)</th>
             </tr></thead>
             <tbody id="revBody"></tbody>
           </table>

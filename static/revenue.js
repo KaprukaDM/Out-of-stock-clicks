@@ -11,11 +11,12 @@
 
   const st = {
     data: null, vendor: '', category: '', q: '', topMetric: 'lost',
-    sort: 'lost', dir: 'desc', offset: 0,
+    sort: 'lost', dir: 'desc', offset: 0, userSorted: false, priceSeq: 0,
   };
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = (n) => Math.round(n).toLocaleString();
+  const money = (n) => (n == null ? '—' : Math.round(n).toLocaleString());
   const pct = (a, b) => (b > 0 ? (a / b * 100).toFixed(1) + '%' : '—');
 
   // ───────────── tab switching
@@ -197,7 +198,9 @@
       st.vendor = ''; st.category = ''; st.q = ''; st.offset = 0; st.sort = 'lost'; st.dir = 'desc';
       fillFilters();
       $('revSearch').value = '';
+      st.topMetric = 'lost'; st.userMetric = false; st.userSorted = false;
       renderAll();
+      pollPrices();
     } catch (e) {
       msg.hidden = false; msg.textContent = e.message;
     } finally {
@@ -223,62 +226,103 @@
       n.innerHTML = `📅 Previous <strong>${per.prev[0]} → ${per.prev[1]}</strong> vs current <strong>${per.cur[0]} → ${per.cur[1]}</strong>. Checked the <strong>${fmt(t.ranked)}</strong> products that sold in the previous period for ≥ <strong>${d.params.min_oos_days}</strong> out-of-stock day${d.params.min_oos_days === 1 ? '' : 's'} in the current one. Loss is in <strong>units</strong> (Ninja gives no price).`;
     }
 
+    renderKpis();
+    $('revVendorFilter').hidden = !d.items.some((i) => i.vendor !== 'Unknown');
+    renderTop(); renderList();
+  }
+
+
+  // Rupee figures arrive as the server looks products up on Kapruka's MCP, so
+  // the KPI cards are rebuilt from the items every time prices come in.
+  function renderKpis() {
+    const d = st.data, t = d.totals;
+    const priced = d.items.filter((i) => i.rev_lost != null);
+    const revenue = priced.reduce((a, i) => a + i.rev_lost, 0);
+    const pendingN = d.items.length - priced.length - d.items.filter((i) => i.price_failed).length;
     const kpi = (label, value, sub, cls = '') => `<div class="rev-kpi ${cls}"><div class="rev-kpi-label">${label}</div><div class="rev-kpi-value">${value}</div><div class="rev-kpi-sub">${sub}</div></div>`;
     $('revKpis').innerHTML =
       kpi('Sold in previous period', fmt(t.ranked), `of ${fmt(t.uploaded)} products in either period`) +
       kpi('Went out of stock', fmt(t.went_oos), `${pct(t.went_oos, t.ranked)} of those`, 'accent') +
       kpi('With lost sales', fmt(t.with_loss), 'out of stock and sold less than before', 'accent') +
-      kpi(d.has_revenue ? 'Revenue lost' : 'Units lost', fmt(t.lost), `${pct(t.lost, t.ranked_base1)} of their previous-period ${d.has_revenue ? 'revenue' : 'units'}`, 'danger');
+      kpi('Units lost', fmt(t.lost), `${pct(t.lost, t.ranked_base1)} of their previous-period units`, 'accent') +
+      kpi('Revenue lost (LKR)', priced.length ? money(revenue) : '…',
+        priced.length === d.items.length ? 'units lost × current price'
+          : `pricing ${fmt(priced.length)} of ${fmt(d.items.length)}${pendingN > 0 ? ' — still filling in' : ''}`, 'danger');
+  }
 
-    // Units-only data: the loss is in units and there is no vendor to filter by.
-    const unitsOnly = !d.has_revenue;
-    document.querySelector('#revTable th[data-sort="lost"]').textContent = unitsOnly ? 'Units Lost' : 'Revenue Lost';
-    document.querySelector('#revTopTable thead th:nth-child(2)').textContent = unitsOnly ? 'Units Lost' : 'Revenue Lost';
-    $('revTopSeg').hidden = unitsOnly;
-    if (unitsOnly) st.topMetric = 'lost';
-    $('revVendorFilter').hidden = !d.items.some((i) => i.vendor !== 'Unknown');
-    renderTop(); renderList();
+  // After an analysis, poll the server for prices it is still looking up and
+  // fold them in as they land. Stops when nothing is pending or the user
+  // starts a new analysis (priceSeq).
+  async function pollPrices() {
+    const seq = ++st.priceSeq;
+    for (let n = 0; n < 400; n++) {
+      if (seq !== st.priceSeq || !st.data) return;
+      const todo = st.data.items.filter((i) => i.price == null && !i.price_failed);
+      if (!todo.length) return;
+      let r;
+      try { r = await post('api/prices/lookup', { codes: todo.map((i) => i.product_code) }); } catch (e) { return; }
+      if (seq !== st.priceSeq) return;
+      let changed = false;
+      for (const it of todo) {
+        const info = r.prices[it.product_code];
+        if (!info) continue;
+        if (info.price == null) { it.price_failed = true; changed = true; continue; }
+        it.price = info.price; it.rev_lost = it.lost * info.price;
+        if (info.vendor) it.vendor = info.vendor;
+        changed = true;
+      }
+      if (changed) {
+        if (!st.userSorted && st.sort !== 'rev_lost') { st.sort = 'rev_lost'; st.dir = 'desc'; }
+        if (st.topMetric === 'lost' && !st.userMetric) st.topMetric = 'rev_lost';
+        fillFilters(); renderKpis(); renderTop(); renderList();
+      }
+      if (!r.pending) { if (!todo.some((i) => !r.prices[i.product_code])) return; }
+      await sleep(6000);
+    }
   }
 
   // Top-products panel: the biggest losers by the chosen metric, taken from
   // whatever the category / vendor / search filters currently select.
   function topProducts() {
     const k = st.topMetric;
-    return filtered().sort((a, b) => b[k] - a[k]);
+    return filtered().sort((a, b) => (b[k] ?? -1) - (a[k] ?? -1));
   }
   function renderTop() {
     const k = st.topMetric;
     const all = topProducts();
     const chart = all.slice(0, 12);
-    const max = Math.max(1, ...chart.map((i) => i[k]));
+    const max = Math.max(1, ...chart.map((i) => i[k] ?? 0));
     $('revTopChart').innerHTML = chart.length ? chart.map((i) => `
       <div class="rev-bar-row" data-code="${esc(i.product_code)}" title="${esc(i.product_code)} · ${esc(i.vendor)}">
         <span class="rev-bar-label">${esc(i.product_name || i.product_code)}</span>
-        <span class="rev-bar-track"><i class="seg-oos" style="width:${Math.max(0, i[k]) / max * 100}%"></i></span>
-        <span class="rev-bar-val">${fmt(i[k])}</span>
+        <span class="rev-bar-track"><i class="seg-oos" style="width:${Math.max(0, i[k] ?? 0) / max * 100}%"></i></span>
+        <span class="rev-bar-val">${money(i[k])}</span>
       </div>`).join('') : '<div class="empty-state">No products match.</div>';
     $('revTopBody').innerHTML = all.slice(0, 25).map((i) => `
       <tr data-code="${esc(i.product_code)}">
         <td><div class="rev-prod-name">${esc(i.product_name || '—')}</div><div class="pc-code">${esc(i.product_code)}</div></td>
-        <td class="num loss">${fmt(i.lost)}</td>
-        <td class="num">${i.qty_drop > 0 ? '−' : ''}${fmt(Math.abs(i.qty_drop))}</td>
+        <td class="num loss">${money(i.rev_lost)}</td>
+        <td class="num">${fmt(i.lost)}</td>
         <td class="num">${i.qty_drop_pct == null ? '—' : (i.qty_drop_pct > 0 ? '−' : '+') + Math.abs(i.qty_drop_pct) + '%'}</td>
         <td class="num">${fmt(i.oos_views)}</td>
       </tr>`).join('') || '<tr><td colspan="5" class="empty-state">Nothing to show.</td></tr>';
     document.querySelectorAll('#revTopChart .rev-bar-row, #revTopBody tr[data-code]').forEach((r) => r.addEventListener('click', () => openTrend(r.dataset.code)));
     document.querySelectorAll('#revTopSeg button').forEach((b) => b.classList.toggle('active', b.dataset.metric === k));
   }
-  document.querySelectorAll('#revTopSeg button').forEach((b) => b.addEventListener('click', () => { st.topMetric = b.dataset.metric; renderTop(); }));
+  document.querySelectorAll('#revTopSeg button').forEach((b) => b.addEventListener('click', () => { st.topMetric = b.dataset.metric; st.userMetric = true; renderTop(); }));
   const refresh = () => { renderTop(); renderList(); };
 
   // Category / vendor dropdowns list only what is in the current results.
   function fillFilters() {
     const fill = (sel, values, all) => {
+      const keep = sel.value;
       sel.innerHTML = `<option value="">${all}</option>` + values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+      if (values.includes(keep)) sel.value = keep;
     };
     const uniq = (k) => [...new Set(st.data.items.map((i) => i[k]))].sort((a, b) => a.localeCompare(b));
     fill($('revCatFilter'), uniq('category'), 'All categories');
     fill($('revVendorFilter'), uniq('vendor'), 'All vendors');
+    $('revVendorFilter').hidden = !st.data.items.some((i) => i.vendor !== 'Unknown');
   }
   $('revCatFilter').addEventListener('change', (e) => { st.category = e.target.value; st.offset = 0; refresh(); });
   $('revVendorFilter').addEventListener('change', (e) => { st.vendor = e.target.value; st.offset = 0; refresh(); });
@@ -315,8 +359,10 @@
         <td class="num ${i.qty_drop > 0 ? 'loss' : ''}">${i.qty_drop > 0 ? '−' : i.qty_drop < 0 ? '+' : ''}${fmt(Math.abs(i.qty_drop))}</td>
         <td class="num">${i.qty_drop_pct == null ? '—' : (i.qty_drop_pct > 0 ? '−' : '+') + Math.abs(i.qty_drop_pct) + '%'}</td>
         <td class="num loss">${fmt(i.lost)}</td>
+        <td class="num">${money(i.price)}</td>
+        <td class="num loss">${i.rev_lost != null ? money(i.rev_lost) : (i.price_failed ? '<span class="muted-note">n/a</span>' : '<span class="muted-note">…</span>')}</td>
       </tr>`).join('')
-      : '<tr><td colspan="11" class="empty-state">No products went out of stock with lost sales for these settings.</td></tr>';
+      : '<tr><td colspan="13" class="empty-state">No products went out of stock with lost sales for these settings.</td></tr>';
     sortMarks('revTable', st.sort, st.dir);
     $('revBody').querySelectorAll('tr[data-code]').forEach((r) => r.addEventListener('click', () => openTrend(r.dataset.code)));
 
@@ -338,6 +384,7 @@
 
   $('revTable').querySelectorAll('th.sortable').forEach((th) => th.addEventListener('click', () => {
     const k = th.dataset.sort;
+    st.userSorted = true;
     if (st.sort === k) st.dir = st.dir === 'asc' ? 'desc' : 'asc'; else { st.sort = k; st.dir = 'desc'; }
     st.offset = 0; renderList();
   }));
@@ -346,12 +393,12 @@
   // Client-side CSV of exactly the rows the current filters select.
   $('revExport').addEventListener('click', () => {
     if (!st.data) return;
-    const head = ['Product Code', 'Product Name', 'Vendor', 'Category', 'Days OOS', 'Units Lost',
+    const head = ['Product Code', 'Product Name', 'Vendor', 'Category', 'Days OOS', 'Units Lost', 'Price (LKR)', 'Revenue Lost (LKR)',
       'Previous Qty', 'Current Qty', 'Qty Drop', 'Qty Drop %', 'OOS Hits', 'First OOS', 'Last OOS'];
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const lines = [head.map(q).join(',')];
     sorted(filtered()).forEach((i) => {
-      lines.push([i.product_code, i.product_name, i.vendor, i.category, i.oos_days, i.lost, i.m1, i.m2, i.qty_drop, i.qty_drop_pct,
+      lines.push([i.product_code, i.product_name, i.vendor, i.category, i.oos_days, i.lost, i.price, i.rev_lost, i.m1, i.m2, i.qty_drop, i.qty_drop_pct,
         i.oos_views, i.first_oos, i.last_oos].map(q).join(','));
     });
     const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });

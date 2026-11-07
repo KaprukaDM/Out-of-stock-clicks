@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Kapruka Out-of-Stock Dashboard - backend.
 
@@ -448,6 +448,11 @@ def init_db():
     # Days the dashboard needs but has no Ninja sales for yet. The office
     # machine's watcher (tools/ninja_sync.py --watch) polls these and fills them.
     con.execute("CREATE TABLE IF NOT EXISTS sales_requests (date TEXT PRIMARY KEY, requested_at TEXT)")
+    # Current price / vendor / stock per product, looked up from Kapruka's public
+    # MCP server (see "product prices" below). price NULL = looked up, not found.
+    con.execute("""CREATE TABLE IF NOT EXISTS product_info (
+        product_code TEXT PRIMARY KEY, name TEXT, price REAL, vendor TEXT, category TEXT,
+        in_stock INTEGER, stock_text TEXT, fetched_at TEXT)""")
     # Key-product monitor: hand-pinned products, per-product alert state (so one
     # stock-out = one alert), and a log of every digest attempted.
     con.execute("CREATE TABLE IF NOT EXISTS key_pins (product_code TEXT PRIMARY KEY, added_at TEXT)")
@@ -1698,6 +1703,161 @@ async def api_sales_range(start: str, end: str):
     }
 
 
+# ------------------------------------------------------------------ product prices
+# Ninja's sales report has units only. To put a rupee figure on a loss we look
+# each product up on Kapruka's free public MCP server (kapruka_get_product):
+# it returns the current checkout price in LKR, the vendor, and a stock status.
+# Revenue lost = units lost x that CURRENT price - an estimate, since the price
+# during the period may have been different (e.g. a sale).
+#
+# The server allows 60 requests/min per IP and takes one product per call, so
+# lookups run in a single background worker at ~45/min (each call takes ~1s), biggest losses
+# first, and are cached in product_info for PRICE_TTL_HOURS. The page polls
+# /api/prices/lookup and fills the numbers in as they arrive.
+MCP_URL = os.environ.get("KAPRUKA_MCP_URL", "https://mcp.kapruka.com/mcp")
+PRICE_TTL_HOURS = float(os.environ.get("PRICE_TTL_HOURS", "24"))
+PRICE_INTERVAL_S = float(os.environ.get("PRICE_INTERVAL_S", "0.3"))
+_price_state: dict = {"queue": [], "queued": set(), "worker": None, "done": 0, "failed": 0}
+
+
+def parse_product_md(txt: str) -> dict | None:
+    """Pull price / vendor / stock out of the MCP tool's markdown answer."""
+    import re as _re
+    m = _re.search(r"\*\*Price\*\*:\s*(?:LKR\s*)?([\d,]+(?:\.\d+)?)", txt)
+    if not m:
+        return None
+    def field(label):
+        x = _re.search(rf"\*\*{label}\*\*:\s*(.+)", txt)
+        return x.group(1).strip() if x else None
+    name = _re.search(r"^##\s+(.+)$", txt, _re.M)
+    stock = field("Stock")
+    return {"name": name.group(1).strip() if name else None, "price": float(m.group(1).replace(",", "")),
+            "vendor": field("Vendor"), "category": field("Category"), "stock_text": stock,
+            "in_stock": None if not stock else (0 if "out of stock" in stock.lower() else 1)}
+
+
+async def _mcp_open(client: httpx.AsyncClient) -> str | None:
+    hdr = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    r = await client.post(MCP_URL, headers=hdr, json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "kapruka-oos-dashboard", "version": "1"}}})
+    r.raise_for_status()
+    sid = r.headers.get("mcp-session-id")
+    h2 = dict(hdr, **({"Mcp-Session-Id": sid} if sid else {}))
+    await client.post(MCP_URL, headers=h2, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return sid
+
+
+async def _mcp_product(client: httpx.AsyncClient, sid: str | None, code: str) -> str:
+    import json as _json
+    hdr = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if sid:
+        hdr["Mcp-Session-Id"] = sid
+    r = await client.post(MCP_URL, headers=hdr, json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "kapruka_get_product", "arguments": {"params": {"product_id": code, "currency": "LKR"}}}})
+    if r.status_code == 429:
+        raise RuntimeError("rate limited")
+    r.raise_for_status()
+    body = r.text
+    if "data:" in body:
+        body = next((l[5:].strip() for l in body.splitlines() if l.startswith("data:")), body)
+    res = _json.loads(body).get("result", {})
+    return "".join(c.get("text", "") for c in res.get("content", []))
+
+
+def _store_product(code: str, info: dict | None) -> None:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    con = db()
+    try:
+        if info:
+            con.execute("""INSERT INTO product_info (product_code, name, price, vendor, category, in_stock, stock_text, fetched_at)
+                           VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(product_code) DO UPDATE SET name=excluded.name, price=excluded.price,
+                           vendor=excluded.vendor, category=excluded.category, in_stock=excluded.in_stock,
+                           stock_text=excluded.stock_text, fetched_at=excluded.fetched_at""",
+                        (code, info["name"], info["price"], info["vendor"], info["category"], info["in_stock"], info["stock_text"], now))
+        else:   # looked up, not found: remember so we don't hammer it every run
+            con.execute("""INSERT INTO product_info (product_code, fetched_at) VALUES (?, ?)
+                           ON CONFLICT(product_code) DO UPDATE SET price=NULL, fetched_at=excluded.fetched_at""", (code, now))
+        con.commit()
+    finally:
+        con.close()
+
+
+async def _price_worker() -> None:
+    st = _price_state
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            sid = await _mcp_open(client)
+            while st["queue"]:
+                code = st["queue"].pop(0)
+                try:
+                    txt = await _mcp_product(client, sid, code)
+                    await asyncio.to_thread(_store_product, code, parse_product_md(txt))
+                    st["done"] += 1
+                except RuntimeError:          # rate limited: put it back and cool off
+                    st["queue"].insert(0, code)
+                    await asyncio.sleep(30)
+                    continue
+                except Exception:
+                    st["failed"] += 1
+                    # a dropped session is the usual cause; reopen once and retry later
+                    try:
+                        sid = await _mcp_open(client)
+                    except Exception:
+                        await asyncio.sleep(10)
+                finally:
+                    st["queued"].discard(code)
+                await asyncio.sleep(PRICE_INTERVAL_S)
+    finally:
+        st["worker"] = None
+        st["queued"].clear()
+
+
+def queue_prices(codes: list[str]) -> int:
+    """Queue codes whose price is missing or older than the TTL, in the order
+    given (callers pass biggest-loss first). Returns how many are pending."""
+    st = _price_state
+    cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - PRICE_TTL_HOURS * 3600))
+    con = db()
+    try:
+        fresh = set()
+        for i in range(0, len(codes), 500):
+            chunk = codes[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            fresh |= {r["product_code"] for r in con.execute(
+                f"SELECT product_code FROM product_info WHERE fetched_at >= ? AND product_code IN ({marks})", [cutoff, *chunk])}
+    finally:
+        con.close()
+    for c in codes:
+        if c not in fresh and c not in st["queued"]:
+            st["queue"].append(c)
+            st["queued"].add(c)
+    if st["queue"] and st["worker"] is None:
+        st["worker"] = asyncio.get_running_loop().create_task(_price_worker())
+    return len(st["queue"])
+
+
+class PriceLookup(BaseModel):
+    codes: list[str]
+
+
+@app.post("/api/prices/lookup")
+async def api_prices_lookup(req: PriceLookup):
+    """Whatever is cached for these codes, plus how many lookups are still
+    queued. The revenue tab polls this while prices are filling in."""
+    codes = [c.strip() for c in req.codes if c.strip()][:3000]
+    out: dict[str, dict] = {}
+    con = db()
+    try:
+        for i in range(0, len(codes), 500):
+            chunk = codes[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in con.execute(f"SELECT product_code, price, vendor, category, in_stock FROM product_info WHERE product_code IN ({marks})", chunk):
+                out[r["product_code"]] = {"price": r["price"], "vendor": r["vendor"], "category": r["category"], "in_stock": r["in_stock"]}
+    finally:
+        con.close()
+    return {"prices": out, "pending": len(_price_state["queue"])}
+
+
 # ------------------------------------------------------------------ revenue loss
 # Third tab. The user uploads two monthly sales extracts (Product Code, Product
 # Name, Vendor, Product Qty, Total Selling price) and we answer: of the
@@ -1843,6 +2003,32 @@ async def api_revenue_loss(req: RevenueLossRequest):
             "last_oos": ev["last_oos"] if ev else None,
         })
     items.sort(key=lambda i: -i["lost"])
+    # Rupee value: units lost x current price (from the MCP lookup cache). Prices
+    # not known yet are queued - biggest losses first - and the page fills them
+    # in via /api/prices/lookup.
+    if not has_rev and items:
+        codes = [i["product_code"] for i in items]
+        info: dict[str, sqlite3.Row] = {}
+        pcon = db()
+        try:
+            for k in range(0, len(codes), 500):
+                chunk = codes[k:k + 500]
+                marks = ",".join("?" * len(chunk))
+                for r in pcon.execute(f"SELECT product_code, price, vendor, category FROM product_info WHERE product_code IN ({marks})", chunk):
+                    info[r["product_code"]] = r
+        finally:
+            pcon.close()
+        for i in items:
+            r = info.get(i["product_code"])
+            if r and r["price"] is not None:
+                i["price"] = r["price"]
+                i["rev_lost"] = i["lost"] * r["price"]
+            else:
+                i["price"] = None
+                i["rev_lost"] = None
+            if r and r["vendor"]:
+                i["vendor"] = r["vendor"]
+        queue_prices(codes)
     return {
         "window": {"start": oos_start, "end": oos_end, "days": window_days,
                    "data_from": data_lo, "data_to": data_hi, "covered_days": covered_days},
