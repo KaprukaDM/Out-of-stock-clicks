@@ -2041,6 +2041,62 @@ async def api_revenue_loss(req: RevenueLossRequest):
     }
 
 
+@app.get("/api/oos-loss-estimate")
+async def api_oos_loss_estimate(start: str | None = None, end: str | None = None):
+    """Quick estimate of revenue lost to stock-outs from the synced data alone.
+
+    For each product with out_of_stock_view days in [start, end] (default: all
+    synced OOS dates): baseline = mean daily units on its in-stock synced sales
+    days (needs >= 2 units of evidence); lost units = sum over its OOS days of
+    baseline - actual units; revenue = lost units x cached MCP price. Rough:
+    GA4 OOS days are a visit proxy and the price is today's, not the period's.
+    Unpriced products are queued for lookup and counted in `unpriced`."""
+    start, end = validate_window(start, end)
+    con = db()
+    try:
+        days = [r[0] for r in con.execute("SELECT DISTINCT date FROM daily_sales ORDER BY 1")]
+        lo = start or "0000-00-00"
+        hi = end or "9999-99-99"
+        oos: dict[str, set] = {}
+        for r in con.execute("SELECT date, product_code FROM oos_daily WHERE oos_views > 0 AND date BETWEEN ? AND ?", (lo, hi)):
+            oos.setdefault(r["product_code"], set()).add(r["date"])
+        sales: dict[str, dict] = {}
+        names: dict[str, str] = {}
+        for r in con.execute("SELECT date, product_code, product_name, qty FROM daily_sales"):
+            sales.setdefault(r["product_code"], {})[r["date"]] = r["qty"]
+            names[r["product_code"]] = r["product_name"]
+        prices = {r["product_code"]: r["price"] for r in con.execute("SELECT product_code, price FROM product_info WHERE price IS NOT NULL")}
+    finally:
+        con.close()
+    dayset = set(days)
+    items = []
+    for code, od in oos.items():
+        od = od & dayset
+        sd = sales.get(code)
+        if not sd or not od:
+            continue
+        non = [d for d in days if d not in od]
+        got = sum(sd.get(d, 0) for d in non)
+        if not non or got < 2:
+            continue
+        base = got / len(non)
+        lost = sum(base - sd.get(d, 0) for d in od)
+        if lost > 0:
+            items.append({"product_code": code, "product_name": names.get(code), "oos_days": len(od),
+                          "baseline_per_day": round(base, 2), "lost_units": round(lost, 1),
+                          "price": prices.get(code)})
+    for i in items:
+        i["rev_lost"] = round(i["lost_units"] * i["price"]) if i["price"] else None
+    items.sort(key=lambda i: -(i["rev_lost"] or 0))
+    missing = [i["product_code"] for i in items if i["price"] is None]
+    if missing:
+        queue_prices(missing)
+    return {"window": {"start": start, "end": end, "sales_days": len(days)},
+            "products": len(items), "lost_units": round(sum(i["lost_units"] for i in items), 1),
+            "rev_lost": sum(i["rev_lost"] or 0 for i in items), "unpriced": len(missing),
+            "items": items[:50]}
+
+
 # ------------------------------------------------------------------ key products
 # Key products = the best sellers in the synced Ninja daily sales: the union of
 # the top KEY_TOP_N by units over the last 7 days and over the last 14 days

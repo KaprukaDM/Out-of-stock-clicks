@@ -408,3 +408,15 @@
     a.click(); URL.revokeObjectURL(a.href);
   });
 })();
+
+// Quick synced-data estimate shown above the upload analysis (/api/oos-loss-estimate).
+(function () {
+  const val = document.getElementById('oosEstVal'), sub = document.getElementById('oosEstSub');
+  if (!val) return;
+  fetch('api/oos-loss-estimate').then((r) => r.json()).then((d) => {
+    val.textContent = 'LKR ' + Math.round(d.rev_lost).toLocaleString();
+    sub.textContent = '· ' + d.products + ' products, ~' + Math.round(d.lost_units).toLocaleString() + ' units'
+      + (d.unpriced ? ' · ' + d.unpriced + ' still being priced, reload shortly' : '')
+      + ' · rough: baseline sales vs OOS days, current MCP prices';
+  }).catch(() => { val.textContent = 'unavailable'; });
+})();
