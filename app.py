@@ -2123,7 +2123,8 @@ async def api_oos_loss_estimate(start: str | None = None, end: str | None = None
     for i in items:
         i["rev_lost"] = round(i["lost_units"] * i["price"]) if i["price"] else None
     items.sort(key=lambda i: -(i["rev_lost"] or 0))
-    missing = [i["product_code"] for i in items if i["price"] is None]
+    # biggest unit losses first, so the priciest-impact products get priced first
+    missing = [i["product_code"] for i in sorted(items, key=lambda i: -i["lost_units"]) if i["price"] is None]
     if missing:
         queue_prices(missing)
     return {"window": {"start": start, "end": end, "sales_days": len(days)},
