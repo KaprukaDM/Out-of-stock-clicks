@@ -165,6 +165,7 @@ function buildFilterParams(view = state.view) {
   if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
   if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
   if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
+  if (el('keyFilter').value) params.set('key_only', '1');
   if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
   params.set('sort', state[view].sort);
   params.set('dir', state[view].dir);
@@ -231,6 +232,7 @@ async function loadOtherTabCount() {
     if (el('categoryFilter').value) params.set('category', el('categoryFilter').value);
     if (el('partnerFilter').value) params.set('partner', el('partnerFilter').value);
     if (el('sourceFilter').value) params.set('source', el('sourceFilter').value);
+    if (el('keyFilter').value) params.set('key_only', '1');
     if (el('searchBox').value.trim()) params.set('q', el('searchBox').value.trim());
     // Sent regardless of which tab is open: the server only applies the OOS
     // window to the recovered count, so the badge matches that tab's rows.
@@ -576,7 +578,7 @@ function applyFilters() {
 }
 
 ['startDate', 'endDate', 'oosStartDate', 'oosEndDate',
- 'categoryFilter', 'partnerFilter', 'sourceFilter'].forEach(id => {
+ 'categoryFilter', 'partnerFilter', 'sourceFilter', 'keyFilter'].forEach(id => {
   el(id).addEventListener('change', applyFilters);
   // Date pickers in Chrome fire `input` (not `change`) when the field is
   // cleared with the little ✕, which would otherwise leave the table showing

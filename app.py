@@ -1146,6 +1146,21 @@ def _recovered_rollup(
     return items, meta, False
 
 
+def compute_key_set_from(con: sqlite3.Connection) -> set[str]:
+    return {i["product_code"] for i in compute_key_products(con)[0]}
+
+
+def key_code_set() -> set[str]:
+    """Codes of the current key products (top sellers + pins), for the
+    "Key products only" filter. Applied after the cached rollups so it never
+    multiplies cache entries."""
+    con = db()
+    try:
+        return {i["product_code"] for i in compute_key_products(con)[0]}
+    finally:
+        con.close()
+
+
 @app.get("/api/products")
 def api_products(
     start: str | None = None,
@@ -1158,8 +1173,12 @@ def api_products(
     dir: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    key_only: bool = False,
 ):
     items, recency = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
+    if key_only:
+        keys = key_code_set()
+        items = [i for i in items if i["product_code"] in keys]
     # `count` is the post-gate total, so pagination and any "N products"
     # summary reflect exactly the rows the report actually contains.
     total = len(items)
@@ -1181,6 +1200,7 @@ def api_tab_counts(
     oos_start: str | None = None,
     oos_end: str | None = None,
     need: str = Query("both", pattern="^(both|active|recovered)$"),
+    key_only: bool = False,
 ):
     """How many products sit on each tab under the current filters, for the
     tab badges.
@@ -1221,13 +1241,14 @@ def api_tab_counts(
     shared_sql, shared_params = filter_sql()
     cutoff = recency_cutoff_date()
     active = active_product_codes(con, cutoff)
+    keys = compute_key_set_from(con) if key_only else None
 
     out: dict = {"cutoff": cutoff}
     cached = True  # flipped false as soon as either half has to hit SQLite
 
     if need in ("both", "active"):
         # Active tab: codes with a hit inside the date range that also pass the gate.
-        key = ("count_active", _data_version, cutoff, start, end, category, partner, source, q)
+        key = ("count_active", _data_version, cutoff, start, end, category, partner, source, q, key_only)
         hit = cache_get(key)
         if hit is not _MISS:
             out["active"] = hit
@@ -1247,7 +1268,7 @@ def api_tab_counts(
             params += shared_params
             if in_range is _MISS:
                 in_range = cache_put(set_key, {r["product_code"] for r in con.execute(sql, params).fetchall()}, rows=1000)
-            out["active"] = cache_put(key, len(in_range & active & (matching_codes(q) if q else in_range)))
+            out["active"] = cache_put(key, len(in_range & active & (matching_codes(q) if q else in_range) & (keys if keys is not None else in_range)))
 
     if need in ("both", "recovered"):
         # Back-in-stock tab: codes out of stock at some point inside that tab's
@@ -1256,7 +1277,7 @@ def api_tab_counts(
         # rule - products are trimmed to the range now, not dropped for
         # straddling its edges.
         key = ("count_recovered", _data_version, cutoff, oos_start, oos_end,
-               category, partner, source, q)
+               category, partner, source, q, key_only)
         hit = cache_get(key)
         if hit is not _MISS:
             out["recovered"] = hit
@@ -1279,7 +1300,7 @@ def api_tab_counts(
                 ever = cache_put(set_key, {r["product_code"] for r in con.execute(rec_sql, rec_params).fetchall()}, rows=1000)
             if q:
                 ever = ever & matching_codes(q)
-            out["recovered"] = cache_put(key, len(ever - active))
+            out["recovered"] = cache_put(key, len((ever & keys if keys is not None else ever) - active))
         out["oos_start"] = oos_start
         out["oos_end"] = oos_end
 
@@ -1300,6 +1321,7 @@ def api_back_in_stock(
     dir: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    key_only: bool = False,
 ):
     """Products the recency gate removed from the main report - they stopped
     firing out_of_stock_view, so they're presumed back in stock - with how
@@ -1313,6 +1335,9 @@ def api_back_in_stock(
     oos_start, oos_end = validate_window(oos_start, oos_end)
     items, meta = fetch_recovered_products(category, partner, source, q, sort, dir,
                                           oos_start=oos_start, oos_end=oos_end)
+    if key_only:
+        keys = key_code_set()
+        items = [i for i in items if i["product_code"] in keys]
     total = len(items)
     page = items[offset:offset + limit]
     return {
@@ -1334,6 +1359,7 @@ def api_export(
     sort: str = Query("oos_views"),
     dir: str = Query("desc", pattern="^(asc|desc)$"),
     view: str = Query("active", pattern="^(active|back_in_stock)$"),
+    key_only: bool = False,
 ):
     """CSV of whichever tab the user is on: the active report (default) or the
     back-in-stock list. Same fetch call as the matching API endpoint, so the
@@ -1353,6 +1379,9 @@ def api_export(
         oos_start, oos_end = validate_window(oos_start, oos_end)
         items, _ = fetch_recovered_products(category, partner, source, q, sort, dir,
                                             oos_start=oos_start, oos_end=oos_end)
+        if key_only:
+            keys = key_code_set()
+            items = [i for i in items if i["product_code"] in keys]
         writer.writerow([
             "Product Code", "Product Name", "Partner Code", "Partner Name", "Category", "Source",
             "Days OOS (days with events)", "OOS Span (calendar days)", "OOS Views",
@@ -1373,6 +1402,9 @@ def api_export(
         # Same call as /api/products, so the CSV is exactly the gated+filtered
         # set the table shows; the recency meta itself is UI-only, hence dropped.
         items, _ = fetch_filtered_products(start, end, category, partner, source, q, sort, dir)
+        if key_only:
+            keys = key_code_set()
+            items = [i for i in items if i["product_code"] in keys]
         # Column order mirrors the dashboard table exactly.
         writer.writerow([
             "Product Code", "Product Name", "Partner Code", "Partner Name", "Category",
@@ -2042,7 +2074,7 @@ async def api_revenue_loss(req: RevenueLossRequest):
 
 
 @app.get("/api/oos-loss-estimate")
-async def api_oos_loss_estimate(start: str | None = None, end: str | None = None):
+async def api_oos_loss_estimate(start: str | None = None, end: str | None = None, key_only: bool = False):
     """Quick estimate of revenue lost to stock-outs from the synced data alone.
 
     For each product with out_of_stock_view days in [start, end] (default: all
@@ -2066,6 +2098,9 @@ async def api_oos_loss_estimate(start: str | None = None, end: str | None = None
             sales.setdefault(r["product_code"], {})[r["date"]] = r["qty"]
             names[r["product_code"]] = r["product_name"]
         prices = {r["product_code"]: r["price"] for r in con.execute("SELECT product_code, price FROM product_info WHERE price IS NOT NULL")}
+        if key_only:
+            keep = compute_key_set_from(con)
+            oos = {c: d for c, d in oos.items() if c in keep}
     finally:
         con.close()
     dayset = set(days)
