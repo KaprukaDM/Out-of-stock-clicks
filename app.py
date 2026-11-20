@@ -1530,6 +1530,7 @@ def warm_cache() -> None:
 
 @app.on_event("startup")
 async def _warm_on_startup():
+    _MAIN_LOOP["loop"] = asyncio.get_running_loop()
     threading.Thread(target=warm_cache, daemon=True).start()
 
 
@@ -1864,8 +1865,22 @@ def queue_prices(codes: list[str]) -> int:
             st["queue"].append(c)
             st["queued"].add(c)
     if st["queue"] and st["worker"] is None:
-        st["worker"] = asyncio.get_running_loop().create_task(_price_worker())
+        try:
+            st["worker"] = asyncio.get_running_loop().create_task(_price_worker())
+        except RuntimeError:
+            # called from a threadpool (sync endpoint): hand the start to the main loop
+            loop = _MAIN_LOOP.get("loop")
+            if loop is not None:
+                st["worker"] = True           # placeholder so we don't start two
+                loop.call_soon_threadsafe(_start_price_worker)
     return len(st["queue"])
+
+
+_MAIN_LOOP: dict = {}
+
+
+def _start_price_worker() -> None:
+    _price_state["worker"] = asyncio.get_running_loop().create_task(_price_worker())
 
 
 class PriceLookup(BaseModel):
@@ -2074,7 +2089,7 @@ async def api_revenue_loss(req: RevenueLossRequest):
 
 
 @app.get("/api/oos-loss-estimate")
-async def api_oos_loss_estimate(start: str | None = None, end: str | None = None, key_only: bool = False):
+def api_oos_loss_estimate(start: str | None = None, end: str | None = None, key_only: bool = False):
     """Quick estimate of revenue lost to stock-outs from the synced data alone.
 
     For each product with out_of_stock_view days in [start, end] (default: all
@@ -2095,6 +2110,8 @@ async def api_oos_loss_estimate(start: str | None = None, end: str | None = None
         sales: dict[str, dict] = {}
         names: dict[str, str] = {}
         for r in con.execute("SELECT date, product_code, product_name, qty FROM daily_sales"):
+            if r["product_code"] not in oos:
+                continue
             sales.setdefault(r["product_code"], {})[r["date"]] = r["qty"]
             names[r["product_code"]] = r["product_name"]
         prices = {r["product_code"]: r["price"] for r in con.execute("SELECT product_code, price FROM product_info WHERE price IS NOT NULL")}
@@ -2110,11 +2127,11 @@ async def api_oos_loss_estimate(start: str | None = None, end: str | None = None
         sd = sales.get(code)
         if not sd or not od:
             continue
-        non = [d for d in days if d not in od]
-        got = sum(sd.get(d, 0) for d in non)
-        if not non or got < 2:
+        n_non = len(days) - len(od)
+        got = sum(sd.values()) - sum(sd.get(d, 0) for d in od)
+        if n_non <= 0 or got < 2:
             continue
-        base = got / len(non)
+        base = got / n_non
         lost = sum(base - sd.get(d, 0) for d in od)
         if lost > 0:
             items.append({"product_code": code, "product_name": names.get(code), "oos_days": len(od),
