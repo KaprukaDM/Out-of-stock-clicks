@@ -2547,6 +2547,11 @@ async def index():
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    return Response((STATIC / "favicon.webp").read_bytes(), media_type="image/webp", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/app.js")
 async def app_js():
     return Response((STATIC / "app.js").read_text(encoding="utf-8"), media_type="application/javascript", headers={"Cache-Control": "no-cache"})
